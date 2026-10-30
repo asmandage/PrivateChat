@@ -18,8 +18,16 @@
              object-src 'none';
              base-uri 'self';
              form-action 'self'" />
-  <title>PrivateChat</title>
-  <link rel="icon" href="assets/icons/favicon.svg" type="image/svg+xml" />
+  <title>My Offers</title>
+  <link rel="icon" href="assets/icons/app-icon.svg" type="image/svg+xml" />
+  <!-- Installable app (PWA). The installed name/icon are neutral because Android shows
+       them above every notification. -->
+  <link rel="manifest" href="manifest.json" />
+  <link rel="apple-touch-icon" href="assets/icons/apple-touch-icon.png" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-title" content="My Offers" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="default" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" />
@@ -59,6 +67,8 @@
     <symbol id="i-call-in" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M16 2v6h6M22 2l-6 6"/></symbol>
     <symbol id="i-call-out" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M22 8V2h-6M16 8l6-6"/></symbol>
     <symbol id="i-wifi-off" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m2 2 20 20M8.5 16.4a5 5 0 0 1 7 0M2 8.8a15 15 0 0 1 4.2-2.6M10.7 5a15 15 0 0 1 11.3 3.8M5 12.9a10 10 0 0 1 5.2-2.8M17.8 12.6a10 10 0 0 1 1.2.3M12 20h.01"/></g></symbol>
+    <symbol id="i-download" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12M7 10l5 5 5-5M5 21h14"/></g></symbol>
+    <symbol id="i-headphones" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 18v-6a9 9 0 0 1 18 0v6"/><path d="M21 19a2 2 0 0 1-2 2h-1a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2h3v5ZM3 19a2 2 0 0 0 2 2h1a2 2 0 0 0 2-2v-3a2 2 0 0 0-2-2H3v5Z"/></g></symbol>
     <symbol id="i-volume" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5 6 9H2v6h4l5 4V5Z"/><path d="M15.5 8.5a5 5 0 0 1 0 7M19 5a10 10 0 0 1 0 14"/></g></symbol>
   </svg>
 
@@ -106,6 +116,9 @@
       </form>
 
       <p class="login-footnote"><svg><use href="#i-lock"/></svg> No sign-ups. Access is limited to two authorized accounts.</p>
+      <button id="install-btn-login" class="btn btn-secondary btn-block install-btn" type="button" hidden>
+        <svg><use href="#i-download"/></svg> Install App
+      </button>
     </div>
   </section>
 
@@ -122,6 +135,7 @@
           </div>
         </div>
         <div class="header-actions">
+          <button id="install-btn" class="icon-btn" type="button" aria-label="Install app" title="Install app" hidden><svg><use href="#i-download"/></svg></button>
           <button id="theme-toggle" class="icon-btn" aria-label="Toggle dark mode" title="Toggle theme">
             <svg class="icon-sun"><use href="#i-sun"/></svg><svg class="icon-moon"><use href="#i-moon"/></svg>
           </button>
@@ -175,6 +189,7 @@
         <div class="header-actions">
           <button id="audio-call-btn" class="icon-btn" aria-label="Start audio call" title="Audio call"><svg><use href="#i-phone"/></svg></button>
           <button id="video-call-btn" class="icon-btn" aria-label="Start video call" title="Video call"><svg><use href="#i-video"/></svg></button>
+          <button id="delete-chat-btn" class="icon-btn" aria-label="Delete conversation" title="Delete conversation"><svg><use href="#i-trash"/></svg></button>
           <button id="open-settings-2" class="icon-btn mobile-only" aria-label="Settings" title="Settings"><svg><use href="#i-settings"/></svg></button>
         </div>
       </header>
@@ -255,6 +270,7 @@
       <span id="call-type-label" class="call-pill"><svg><use href="#i-lock"/></svg> Audio call</span>
       <span id="call-timer-small" class="call-pill" hidden>00:00</span>
       <span id="call-quality" class="call-pill warn" hidden>Reconnecting…</span>
+      <span id="call-audio-route" class="call-pill" hidden><svg><use href="#i-headphones"/></svg> Audio output</span>
     </div>
 
     <div id="local-preview" class="local-preview" hidden>
@@ -308,10 +324,27 @@
           <h3>Notifications</h3>
           <label class="switch-row"><span>Message sounds</span><input type="checkbox" id="pref-message-sound" class="switch" /></label>
           <label class="switch-row"><span>Ringtone for incoming calls</span><input type="checkbox" id="pref-ringtone" class="switch" /></label>
-          <label class="switch-row"><span>Browser notifications</span><input type="checkbox" id="pref-browser-notify" class="switch" /></label>
-          <label class="switch-row"><span>Show message text in notifications</span><input type="checkbox" id="pref-notify-preview" class="switch" /></label>
+          <label class="switch-row"><span>Private notifications</span><input type="checkbox" id="pref-browser-notify" class="switch" /></label>
           <p id="notify-permission-note" class="muted small"></p>
-          <p class="muted small">Notifications only arrive while this page is open (in a tab, even in the background). Closed or suspended browsers cannot receive calls — see README.</p>
+          <p class="muted small">Notifications never show names, message text or call details — only the coded text below. Tapping one just dismisses it; open the app yourself to see what happened.</p>
+          <p id="push-note" class="muted small"></p>
+
+          <form id="notify-code-form" class="code-form" novalidate>
+            <label class="field"><span>Notification title</span><input id="code-title" type="text" maxlength="40" required /></label>
+            <label class="field"><span>Notification text — <code>{code}</code> is replaced by the code</span><input id="code-body" type="text" maxlength="80" required /></label>
+            <div class="code-grid">
+              <label class="field"><span>New message code</span><input id="code-m" type="text" maxlength="12" autocapitalize="characters" required /></label>
+              <label class="field"><span>Audio call code</span><input id="code-a" type="text" maxlength="12" autocapitalize="characters" required /></label>
+              <label class="field"><span>Video call code</span><input id="code-v" type="text" maxlength="12" autocapitalize="characters" required /></label>
+              <label class="field"><span>Missed call code</span><input id="code-mc" type="text" maxlength="12" autocapitalize="characters" required /></label>
+            </div>
+            <label class="switch-row"><span>Silent notifications (no sound or vibration)</span><input type="checkbox" id="code-silent" class="switch" /></label>
+            <div class="form-actions">
+              <button id="code-test" class="btn btn-secondary" type="button">Send test</button>
+              <button class="btn btn-primary" type="submit">Save codes</button>
+            </div>
+            <p class="muted small">Codes are stored only on this device and are never sent to any server.</p>
+          </form>
         </section>
 
         <section class="settings-group">
@@ -321,6 +354,19 @@
           <label class="field" id="speaker-field"><span>Speaker</span><select id="pref-speaker"></select></label>
           <button id="refresh-devices" class="btn btn-secondary" type="button">Detect devices</button>
           <p class="muted small" id="devices-note">Device names appear after you grant camera/microphone permission once.</p>
+          <p class="muted small">Private call audio: browsers cannot force the phone earpiece or block the loudspeaker, and on many phones call audio plays on the loudspeaker unless headphones are connected. Use wired or Bluetooth headphones for private calls. The app never switches to the loudspeaker itself.</p>
+        </section>
+
+        <section class="settings-group">
+          <h3>Chat history</h3>
+          <p class="muted small">Delete all messages and call history — only for you, or permanently for both of you.</p>
+          <button id="clear-history-btn" class="btn btn-secondary btn-block" type="button"><svg><use href="#i-trash"/></svg> Clear all chat history</button>
+        </section>
+
+        <section class="settings-group">
+          <h3>App</h3>
+          <button id="install-btn-settings" class="btn btn-secondary btn-block" type="button" hidden><svg><use href="#i-download"/></svg> Install App</button>
+          <p id="install-note" class="muted small"></p>
         </section>
 
         <section class="settings-group">
@@ -341,7 +387,7 @@
   </div>
 
   <!-- ============ Confirm dialog ============ -->
-  <div id="confirm-modal" class="modal" hidden role="alertdialog" aria-modal="true" aria-labelledby="confirm-title" aria-describedby="confirm-text">
+  <div id="confirm-modal" class="modal over-calls" hidden role="alertdialog" aria-modal="true" aria-labelledby="confirm-title" aria-describedby="confirm-text">
     <div class="modal-backdrop" data-cancel></div>
     <div class="modal-panel small">
       <div class="modal-body">
@@ -351,6 +397,18 @@
           <button id="confirm-cancel" class="btn btn-secondary" type="button" data-cancel>Cancel</button>
           <button id="confirm-ok" class="btn btn-danger" type="button">Confirm</button>
         </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ Choice dialog (e.g. Delete for me / for everyone) ============ -->
+  <div id="choice-modal" class="modal over-calls" hidden role="alertdialog" aria-modal="true" aria-labelledby="choice-title" aria-describedby="choice-text">
+    <div class="modal-backdrop" data-cancel></div>
+    <div class="modal-panel small">
+      <div class="modal-body">
+        <h2 id="choice-title"></h2>
+        <p id="choice-text" class="muted pre-line"></p>
+        <div id="choice-actions" class="modal-actions"></div>
       </div>
     </div>
   </div>

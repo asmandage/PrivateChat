@@ -1,18 +1,25 @@
 /**
- * Sounds (generated with the Web Audio API — no audio files), browser notifications,
+ * Sounds (generated with the Web Audio API — no audio files), private notifications,
  * unread counter and document-title updates.
  *
  * Browsers block audio until the user has interacted with the page, so the
  * AudioContext is created/resumed on the first pointer or key event.
+ *
+ * Notifications are PRIVATE: they only ever show the coded title/text configured in
+ * Settings (notify-config.js) — never a name, message text or call details — and
+ * tapping one just dismisses it (sw.js).
  */
 import { getPrefs } from './settings.js';
+import { getNotifyConfig, renderNotification, NOTIFY_TAGS } from './notify-config.js';
+import { getServiceWorker } from './pwa.js';
 
-const BASE_TITLE = 'PrivateChat';
+const BASE_TITLE = 'My Offers';
+const ICON = 'assets/icons/icon-192.png';
+const BADGE = 'assets/icons/badge-96.png';
 let audioCtx = null;
 let ringTimer = null;
 let ringMode = null;   // 'incoming' | 'outgoing' | null
 let unreadCount = 0;
-const activeNotifications = new Map();
 
 /* ---------- Audio unlock ---------- */
 function ensureAudioContext() {
@@ -96,30 +103,39 @@ export function stopRinging() {
 
 export const isRinging = () => ringMode !== null;
 
-/* ---------- Browser notifications ---------- */
+/* ---------- Private notifications ---------- */
 export function canNotify() {
   return 'Notification' in window && Notification.permission === 'granted' && getPrefs().browserNotify;
 }
 
 /**
- * Shows an OS notification only when the page is not visible (otherwise the in-app
- * UI is enough). Works only while the page is still open — see README limitations.
+ * Shows the coded notification for an event kind ('m' | 'a' | 'v' | 'mc') while the
+ * page is open but not on screen. If a background push for the same event also
+ * arrives, it carries the same tag and silently replaces this one (no second alert).
+ * `force` is used by "Send test notification".
  */
-export function notify(tag, title, body, { requireInteraction = false } = {}) {
-  if (!canNotify() || document.visibilityState === 'visible') return;
+export async function notifyPrivate(kind, { force = false } = {}) {
+  if (!canNotify()) return false;
+  if (!force && document.visibilityState === 'visible') return false;
+  const cfg = await getNotifyConfig();
+  const { title, body } = renderNotification(cfg, kind);
+  const options = { body, tag: NOTIFY_TAGS[kind], icon: ICON, badge: BADGE, silent: cfg.silent };
   try {
-    activeNotifications.get(tag)?.close();
-    const n = new Notification(title, { body, tag, icon: 'assets/icons/favicon.svg', requireInteraction, silent: false });
-    n.onclick = () => { window.focus(); n.close(); };
-    activeNotifications.set(tag, n);
+    const reg = await getServiceWorker();
+    if (reg) await reg.showNotification(title, options);
+    else new Notification(title, options);   // desktop browsers without a service worker
+    return true;
   } catch {
-    // Some mobile browsers only allow notifications from a service worker; ignore.
+    return false;
   }
 }
 
-export function closeNotification(tag) {
-  activeNotifications.get(tag)?.close();
-  activeNotifications.delete(tag);
+/** Closes the notification for an event kind (calls share one tag). */
+export async function closeNotification(kind) {
+  const tag = NOTIFY_TAGS[kind];
+  const reg = await getServiceWorker().catch(() => null);
+  const list = await reg?.getNotifications?.({ tag }).catch(() => []);
+  list?.forEach((n) => n.close());
 }
 
 /* ---------- Unread counter ---------- */
@@ -147,8 +163,8 @@ function updateTitle() {
 
 export function resetNotifications() {
   stopRinging();
-  activeNotifications.forEach((n) => n.close());
-  activeNotifications.clear();
+  closeNotification('m');
+  closeNotification('a');
   titleOverride = '';
   setUnread(0);
 }

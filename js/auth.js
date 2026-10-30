@@ -10,8 +10,6 @@ import {
   signInWithEmailAndPassword,
   signOut,
   sendPasswordResetEmail,
-  setPersistence,
-  browserLocalPersistence,
 } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js';
 import { auth } from './firebase.js';
 import { ALLOWED_UIDS } from './firebase-config.js';
@@ -23,13 +21,17 @@ export function getPeerUid(myUid) {
   return ALLOWED_UIDS.find((uid) => uid !== myUid) || null;
 }
 
-function showLoginError(message) {
+export function showLoginError(message) {
   const el = $('login-error');
   el.textContent = message;
   el.hidden = !message;
 }
 
 let formBound = false;
+let signedInHere = false;
+
+/** True when the password was entered in this page load (not a restored sign-in). */
+export const wasSignedInHere = () => signedInHere;
 
 export function initLoginForm() {
   if (formBound) return;
@@ -52,7 +54,8 @@ export function initLoginForm() {
     showLoginError('');
     setButtonLoading(submit, true);
     try {
-      await setPersistence(auth, browserLocalPersistence);
+      // Set before signing in: the auth listener in app.js can fire before this resolves.
+      signedInHere = true;
       const cred = await signInWithEmailAndPassword(auth, email, password);
       if (!isAllowedUid(cred.user.uid)) {
         await signOut(auth);
@@ -61,6 +64,7 @@ export function initLoginForm() {
       }
       $('login-password').value = '';
     } catch (err) {
+      signedInHere = false;
       showLoginError(friendlyError(err, 'Sign-in failed. Please try again.'));
     } finally {
       submitting = false;

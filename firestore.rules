@@ -4,12 +4,16 @@ rules_version = '2';
 //  PrivateChat — Firestore security rules
 //
 //  ⚠ BEFORE PUBLISHING: replace the two placeholder UIDs below with the real
-//    Firebase Authentication UIDs of your two users (same as js/firebase-config.js).
+//    Firebase Authentication UIDs of your two users (same as js/firebase-config.js
+//    and functions/index.js).
 //
 //  Model:
-//    users/{uid}                                    profile + presence + typing + read markers
+//    sessions/{uid}                                 the account's ONLY active sign-in
+//    users/{uid}                                    profile + presence + typing + read/clear markers
+//    users/{uid}/hiddenMessages/{messageId}         messages deleted "for me"
+//    users/{uid}/pushTokens/{sha256(token)}         this user's devices for background push
 //    conversations/main/messages/{messageId}        chat messages
-//    calls/{callId}                                 call session + SDP offer/answer
+//    calls/{callId}                                 call session + SDP offer/answer (+ ICE restarts)
 //    calls/{callId}/callerCandidates/{0..99}        caller ICE candidates
 //    calls/{callId}/calleeCandidates/{0..99}        callee ICE candidates
 //
@@ -35,17 +39,46 @@ service cloud.firestore {
     function existing() { return resource.data; }
     function changedKeys() { return incoming().diff(existing()).affectedKeys(); }
 
+    // Single active session. `auth_time` is set by Google when the user signs in, is
+    // signed into every ID token of that sign-in and survives token refreshes. The
+    // newest sign-in is recorded in sessions/{uid}; any request carrying an older
+    // auth_time is rejected even though its token is still valid. (If the session
+    // document is missing, get() fails and the request is denied.)
+    function isActive() {
+      return isMember()
+        && get(/databases/$(database)/documents/sessions/$(request.auth.uid)).data.authTime
+           == request.auth.token.auth_time;
+    }
+
     // Optional timestamp that may not be in the future (prevents faking "online forever"
     // or "read" receipts for messages that do not exist yet).
     function optPastTimestamp(d, field) {
       return !(field in d) || (d[field] is timestamp && d[field] <= request.time);
     }
 
-    // ---- Users: profile, presence, typing, read/delivered markers ------------
+    // ---- Sessions: one active sign-in per account ------------------------------
+    match /sessions/{userId} {
+      function validSession() {
+        return incoming().keys().hasOnly(['authTime', 'updatedAt'])
+          && incoming().authTime == request.auth.token.auth_time
+          && incoming().updatedAt == request.time;
+      }
+      // Readable by its owner even after being superseded, so the old device can tell.
+      allow read: if isMember() && userId == me();
+      allow create: if isMember() && userId == me() && validSession();
+      // Only a sign-in at least as new as the recorded one may claim the account, so an
+      // older session can never take it back; the newest login always wins a race.
+      allow update: if isMember() && userId == me() && validSession()
+        && incoming().authTime >= existing().authTime;
+      allow delete: if false;
+    }
+
+    // ---- Users: profile, presence, typing, read/delivered/clear markers ------
     match /users/{userId} {
       function validUser(d) {
         return d.keys().hasOnly(['uid', 'displayName', 'state', 'lastActive', 'typing',
-                                 'typingAt', 'lastReadAt', 'lastDeliveredAt'])
+                                 'typingAt', 'lastReadAt', 'lastDeliveredAt',
+                                 'clearedAt', 'callsClearedAt', 'wipedAt'])
           && d.uid == userId
           && d.displayName is string
           && d.displayName.trim().size() >= 1 && d.displayName.size() <= 40
@@ -54,24 +87,53 @@ service cloud.firestore {
           && d.typing is bool
           && optPastTimestamp(d, 'typingAt')
           && optPastTimestamp(d, 'lastReadAt')
-          && optPastTimestamp(d, 'lastDeliveredAt');
+          && optPastTimestamp(d, 'lastDeliveredAt')
+          // "Delete for me" markers: messages / calls up to this time are hidden for this user.
+          && optPastTimestamp(d, 'clearedAt')
+          && optPastTimestamp(d, 'callsClearedAt')
+          // Set after a "delete for everyone" wipe so the other person's app reloads.
+          && optPastTimestamp(d, 'wipedAt');
       }
 
-      allow read: if isMember();
-      allow create: if isMember() && userId == me()
+      allow read: if isActive();
+      allow create: if isActive() && userId == me()
         && incoming().keys().hasAll(['uid', 'displayName', 'state', 'lastActive', 'typing'])
         && validUser(incoming());
-      allow update: if isMember() && userId == me() && validUser(incoming());
+      allow update: if isActive() && userId == me() && validUser(incoming());
       allow delete: if false;
+
+      // Single messages deleted "for me". Private to their owner.
+      match /hiddenMessages/{messageId} {
+        allow read, delete: if isActive() && userId == me();
+        allow create: if isActive() && userId == me()
+          && messageId.size() <= 64
+          && incoming().keys().hasOnly(['createdAt'])
+          && incoming().createdAt == request.time;
+        allow update: if false;
+      }
+
+      // Push tokens. Each records the auth_time of the session that registered it; the
+      // Cloud Function only pushes to tokens of the current session. Never readable by
+      // the other member.
+      match /pushTokens/{tokenId} {
+        allow read, delete: if isActive() && userId == me();
+        allow create, update: if isActive() && userId == me()
+          && tokenId.matches('^[0-9a-f]{64}$')
+          && incoming().keys().hasOnly(['token', 'authTime', 'updatedAt'])
+          && incoming().token is string
+          && incoming().token.size() > 0 && incoming().token.size() <= 4096
+          && incoming().authTime == request.auth.token.auth_time
+          && incoming().updatedAt == request.time;
+      }
     }
 
     // ---- Messages -------------------------------------------------------------
     match /conversations/{conversationId}/messages/{messageId} {
-      allow read: if isMember() && conversationId == 'main';
+      allow read: if isActive() && conversationId == 'main';
 
       // Create only (a retried send with the same id is an update and is denied →
       // no duplicates). Sender must be the caller; server timestamp is mandatory.
-      allow create: if isMember() && conversationId == 'main'
+      allow create: if isActive() && conversationId == 'main'
         && messageId.size() <= 64
         && incoming().keys().hasOnly(['senderId', 'text', 'createdAt', 'deleted'])
         && incoming().keys().hasAll(['senderId', 'text', 'createdAt', 'deleted'])
@@ -83,7 +145,7 @@ service cloud.firestore {
         && incoming().deleted == false;
 
       // The only permitted edit: the SENDER blanks their own message ("delete for everyone").
-      allow update: if isMember() && conversationId == 'main'
+      allow update: if isActive() && conversationId == 'main'
         && existing().senderId == me()
         && existing().deleted == false
         && changedKeys().hasOnly(['text', 'deleted', 'deletedAt'])
@@ -91,8 +153,9 @@ service cloud.firestore {
         && incoming().deleted == true
         && incoming().deletedAt == request.time;
 
-      // Hard deletes are never allowed (keeps history consistent for both users).
-      allow delete: if false;
+      // "Delete conversation for everyone": by the owners' decision, either member may
+      // permanently erase any message in the shared conversation.
+      allow delete: if isActive() && conversationId == 'main';
     }
 
     // ---- Calls ----------------------------------------------------------------
@@ -144,11 +207,29 @@ service cloud.firestore {
           && incoming().endedAt == request.time
           && validReason();
       }
+      // accepted → accepted: after a network change the CALLER publishes a fresh offer
+      // with new ICE credentials (numbered, at most 20 per call) ...
+      function callerRestartsIce() {
+        return existing().callerId == me()
+          && existing().status == 'accepted'
+          && changedKeys().hasOnly(['restartN', 'restartOffer', 'updatedAt'])
+          && incoming().restartN == existing().get('restartN', 0) + 1
+          && incoming().restartN <= 20
+          && validSdp(incoming().restartOffer, 'offer');
+      }
+      // ... and the CALLEE answers that numbered offer.
+      function calleeAnswersRestart() {
+        return existing().calleeId == me()
+          && existing().status == 'accepted'
+          && changedKeys().hasOnly(['restartAnswerN', 'restartAnswer', 'updatedAt'])
+          && incoming().restartAnswerN == existing().get('restartN', 0)
+          && validSdp(incoming().restartAnswer, 'answer');
+      }
 
       // Every call is between the two members, so both may read every call doc.
-      allow read: if isMember();
+      allow read: if isActive();
 
-      allow create: if isMember()
+      allow create: if isActive()
         && incoming().keys().hasOnly(['callerId', 'calleeId', 'participants', 'type', 'status',
                                       'offer', 'createdAt', 'updatedAt'])
         && incoming().keys().hasAll(['callerId', 'calleeId', 'participants', 'type', 'status',
@@ -165,11 +246,18 @@ service cloud.firestore {
       // Terminal states (rejected, busy, cancelled, missed, ended, failed) have no
       // outgoing transition, so they can never be changed again. callerId, calleeId,
       // participants, type, offer and createdAt are never in an allowed key set.
-      allow update: if isMember()
+      allow update: if isActive()
         && incoming().updatedAt == request.time
-        && (calleeAccepts() || calleeEndsRinging() || callerEndsRinging() || participantEndsActive());
+        && (calleeAccepts() || calleeEndsRinging() || callerEndsRinging() || participantEndsActive()
+            || callerRestartsIce() || calleeAnswersRestart());
 
-      allow delete: if false;
+      // "Clear call history for everyone": finished calls only, so a live call can never
+      // be pulled away. An 'accepted' doc abandoned by a crashed tab counts as finished
+      // after a day.
+      allow delete: if isActive()
+        && me() in existing().participants
+        && (!(existing().status in ['ringing', 'accepted'])
+            || existing().updatedAt < request.time - duration.value(1, 'd'));
 
       // ---- ICE candidates (ids "0".."99" → at most 100 docs per side) ----------
       function callData() {
@@ -191,24 +279,24 @@ service cloud.firestore {
       }
 
       match /callerCandidates/{candidateId} {
-        allow read: if isMember();
-        allow create: if isMember()
+        allow read: if isActive();
+        allow create: if isActive()
           && candidateId.matches('^[0-9]{1,2}$')
           && callData().callerId == me()
           && callData().status in ['ringing', 'accepted']
           && validCandidate(incoming());
-        allow delete: if isMember() && callData().callerId == me();
+        allow delete: if isActive() && callData().callerId == me();
         allow update: if false;
       }
 
       match /calleeCandidates/{candidateId} {
-        allow read: if isMember();
-        allow create: if isMember()
+        allow read: if isActive();
+        allow create: if isActive()
           && candidateId.matches('^[0-9]{1,2}$')
           && callData().calleeId == me()
           && callData().status in ['ringing', 'accepted']
           && validCandidate(incoming());
-        allow delete: if isMember() && callData().calleeId == me();
+        allow delete: if isActive() && callData().calleeId == me();
         allow update: if false;
       }
     }

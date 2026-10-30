@@ -20,6 +20,10 @@
  *  - Ringing calls older than STALE_RING_MS (by server-corrected time) are ignored
  *    and marked missed, so a crashed tab can never leave a "ghost" call ringing.
  *  - Local state alone decides "busy"; stale `accepted` docs never block new calls.
+ *  - Network changes during a connected call trigger an ICE restart (the caller sends
+ *    a numbered restartOffer, the callee a restartAnswer) before the call is given up.
+ *  - OS notifications for calls only show the coded text (notify-config.js); names and
+ *    call types stay inside the app.
  */
 import {
   collection,
@@ -27,6 +31,8 @@ import {
   setDoc,
   updateDoc,
   deleteDoc,
+  getDocs,
+  writeBatch,
   query,
   where,
   orderBy,
@@ -39,17 +45,23 @@ import { db } from './firebase.js';
 import { $, toast, paintAvatar, formatDuration, formatListTime, icon, friendlyError } from './ui.js';
 import { PeerSession, getLocalMedia, getIceServers, callSupportError, MediaAccessError } from './webrtc.js';
 import {
-  startRinging, stopRinging, playEndSound, notify, closeNotification, setTitleOverride,
+  startRinging, stopRinging, playEndSound, notifyPrivate, closeNotification, setTitleOverride,
 } from './notifications.js';
 import { serverNow } from './presence.js';
 import { getPrefs, supportsSinkId } from './settings.js';
+import { ensureMediaPermission, showPermissionHelp } from './permissions.js';
 
 const RING_TIMEOUT_MS = 40_000;        // caller gives up → "missed"
 const STALE_RING_MS = 50_000;          // callee ignores ringing docs older than this
 const CONNECT_TIMEOUT_MS = 30_000;     // accepted but ICE never connected
-const DISCONNECT_GRACE_MS = 12_000;    // brief network blips often recover by themselves
+const DISCONNECT_GRACE_MS = 12_000;    // before first connect: brief blips often recover by themselves
+const RECONNECT_GRACE_MS = 30_000;     // after a drop mid-call: time allowed for ICE restarts
+const RESTART_AFTER_MS = 3_000;        // wait this long in "disconnected" before restarting ICE
+const MAX_RESTARTS = 5;
 const MAX_CANDIDATES = 100;            // matches the ^[0-9]{1,2}$ id rule
 const CANDIDATE_TTL_MS = 24 * 3600_000;
+const DELETE_BATCH = 100;
+const HEADSET_LABEL = /head(set|phone)|earphone|earbud|airpods|buds|bluetooth|hands-?free/i;
 
 let ctx = null;                        // { myUid, peerUid, getPeerName }
 let active = null;                     // the current call (see newCall)
@@ -57,6 +69,8 @@ let unsubIncoming = null;
 let unsubHistory = null;
 let uiBound = false;
 let wakeLock = null;
+let preparingCall = false;             // permission explanation is open for an outgoing call
+let callsClearedAt = null;             // Date: call history up to here is deleted for me
 
 const isActive = (c) => c !== null && active === c;
 
@@ -72,6 +86,10 @@ function newCall({ id, ref, role, type, offer = null }) {
     candidateCount: 0,
     writtenCandidates: [],
     answerApplied: false,
+    accepting: false,
+    restartN: 0,                     // caller: last ICE restart offer sent
+    restartPending: false,           // caller: waiting for that restart's answer
+    restartHandled: 0,               // callee: last ICE restart offer answered
     connectedAt: 0,
     timers: {},
     unsubs: [],
@@ -84,9 +102,10 @@ function newCall({ id, ref, role, type, offer = null }) {
    Public API
    ====================================================================== */
 
-export function initCalls({ myUid, peerUid, getPeerName, previousLastActive }) {
+export function initCalls({ myUid, peerUid, getPeerName, previousLastActive, myCallsClearedAt }) {
   destroyCalls();
   ctx = { myUid, peerUid, getPeerName };
+  callsClearedAt = myCallsClearedAt || null;
   bindUi();
   watchIncoming();
   watchHistory(previousLastActive);
@@ -118,11 +137,17 @@ export function refreshCallPeer() {
    ====================================================================== */
 
 export async function startCall(type) {
-  if (!ctx) return;
+  if (!ctx || preparingCall) return;
   if (active) { toast('You are already in a call.', { type: 'warning' }); return; }
   const unsupported = callSupportError();
   if (unsupported) { toast(unsupported, { type: 'error', duration: 7000 }); return; }
   if (!navigator.onLine) { toast('You are offline.', { type: 'error' }); return; }
+
+  // Microphone (+ camera) permission: explain first, never re-prompt after a denial.
+  preparingCall = true;
+  let allowed;
+  try { allowed = await ensureMediaPermission(type); } finally { preparingCall = false; }
+  if (!allowed || !ctx || active) return;
 
   const ref = doc(collection(db, 'calls'));
   const c = newCall({ id: ref.id, ref, role: 'caller', type });
@@ -177,8 +202,11 @@ export async function startCall(type) {
     if (c.remoteStatus === 'ringing') updateCall(c, { status: 'cancelled', endedAt: serverTimestamp(), endReason: 'error' });
     const msg = err instanceof MediaAccessError ? err.message : friendlyError(err, 'Could not start the call.');
     endLocal(c, msg, 'error');
+    if (isPermissionDenial(err)) showPermissionHelp(type === 'video' ? ['microphone', 'camera'] : ['microphone']);
   }
 }
+
+const isPermissionDenial = (err) => err instanceof MediaAccessError && ['NotAllowedError', 'SecurityError'].includes(err.cause);
 
 /* ======================================================================
    Incoming calls
@@ -250,14 +278,15 @@ function showIncoming(c) {
   $('incoming-call').hidden = false;
   $('accept-call').focus({ preventScroll: true });
   startRinging('incoming');
-  setTitleOverride(`📞 ${name} is calling`);
-  notify('call', name, c.type === 'video' ? 'Incoming video call' : 'Incoming audio call', { requireInteraction: true });
+  // The tab title can show in the task switcher, so it stays neutral too.
+  setTitleOverride('•');
+  notifyPrivate(c.type === 'video' ? 'v' : 'a');
 }
 
 function hideIncoming() {
   $('incoming-call').hidden = true;
   stopRinging();
-  closeNotification('call');
+  closeNotification('a');
   setTitleOverride('');
 }
 
@@ -265,12 +294,17 @@ function announceMissed(c) {
   const name = ctx?.getPeerName() || 'Contact';
   const label = c.type === 'video' ? 'video call' : 'call';
   toast(`Missed ${label} from ${name}`, { type: 'warning', duration: 8000 });
-  notify('missed', name, `Missed ${label}`);
+  notifyPrivate('mc');
 }
 
 async function acceptCall() {
   const c = active;
-  if (!c || c.role !== 'callee' || c.status !== 'ringing') return;
+  if (!c || c.role !== 'callee' || c.status !== 'ringing' || c.accepting) return;
+  // Permission check while it keeps ringing; if refused, the user can still decline.
+  c.accepting = true;
+  let allowed;
+  try { allowed = await ensureMediaPermission(c.type); } finally { c.accepting = false; }
+  if (!allowed || !isActive(c) || c.status !== 'ringing') return;
   c.status = 'connecting';
   hideIncoming();
   showCallScreen(c);
@@ -312,6 +346,7 @@ async function acceptCall() {
     if (err instanceof MediaAccessError) {
       updateCall(c, { status: 'rejected', endedAt: serverTimestamp(), endReason: 'media-error' });
       endLocal(c, err.message, 'error');
+      if (isPermissionDenial(err)) showPermissionHelp(c.type === 'video' ? ['microphone', 'camera'] : ['microphone']);
     } else if (err?.code === 'permission-denied') {
       endLocal(c, 'This call is no longer available.', 'warning');
     } else {
@@ -350,6 +385,23 @@ function watchCallDoc(c) {
         .then(() => { if (isActive(c)) { listenRemoteCandidates(c); startConnectTimeout(c); } })
         .catch(() => failCall(c, 'Could not establish the call.'));
       return;
+    }
+
+    // ICE restart: callee answers each new numbered offer; caller applies the answer.
+    if (data.status === 'accepted' && c.peer) {
+      if (c.role === 'callee' && data.restartOffer && (data.restartN || 0) > c.restartHandled) {
+        const n = data.restartN;
+        c.restartHandled = n;
+        c.peer.acceptRestartOffer(data.restartOffer)
+          .then((answer) => (isActive(c)
+            ? updateDoc(c.ref, { restartAnswerN: n, restartAnswer: answer, updatedAt: serverTimestamp() })
+            : null))
+          .catch((err) => console.debug('ICE restart answer skipped', err?.code || err?.name));
+      } else if (c.role === 'caller' && c.restartPending && data.restartAnswer && data.restartAnswerN === c.restartN) {
+        c.restartPending = false;
+        c.peer.applyRestartAnswer(data.restartAnswer)
+          .catch((err) => console.debug('ICE restart answer not applied', err?.name));
+      }
     }
 
     switch (data.status) {
@@ -454,10 +506,58 @@ function startConnectTimeout(c) {
   }, CONNECT_TIMEOUT_MS);
 }
 
+function clearTimer(c, name) {
+  clearTimeout(c.timers[name]);
+  c.timers[name] = null;
+}
+
+/**
+ * The connection dropped. Before the first connect, wait briefly as before. Once the
+ * call was connected, the caller restarts ICE (new network path) and the call is only
+ * given up if nothing recovers within RECONNECT_GRACE_MS.
+ */
+function handleDrop(c, failedNow) {
+  if (!c.connectedAt) {
+    if (failedNow) {
+      failCall(c, 'Could not connect. The networks may block direct connections — a TURN relay is needed (see README).');
+      return;
+    }
+    if (!c.timers.disconnect) {
+      c.timers.disconnect = setTimeout(() => { if (isActive(c)) failCall(c, 'Connection lost.'); }, DISCONNECT_GRACE_MS);
+    }
+    return;
+  }
+  $('call-quality').hidden = false;
+  setCallStatus(c, 'Reconnecting…');
+  if (!c.timers.disconnect) {
+    c.timers.disconnect = setTimeout(() => { if (isActive(c)) failCall(c, 'Connection lost.'); }, RECONNECT_GRACE_MS);
+  }
+  if (c.role === 'caller' && !c.timers.restart) {
+    c.timers.restart = setTimeout(() => { c.timers.restart = null; restartIce(c); }, failedNow ? 0 : RESTART_AFTER_MS);
+  }
+}
+
+async function restartIce(c) {
+  if (!isActive(c) || c.role !== 'caller' || c.restartPending || c.restartN >= MAX_RESTARTS) return;
+  if (c.peer?.lastState === 'connected') return;
+  c.restartPending = true;
+  try {
+    const offer = await c.peer.createRestartOffer();
+    if (!offer || !isActive(c)) { c.restartPending = false; return; }
+    c.restartN += 1;
+    // While offline this write waits in the queue and is sent as soon as the network is back.
+    await updateDoc(c.ref, { restartN: c.restartN, restartOffer: offer, updatedAt: serverTimestamp() });
+  } catch (err) {
+    c.restartPending = false;
+    console.debug('ICE restart skipped', err?.code || err?.name);
+  }
+}
+
 function onConnectionState(c, state) {
   if (state === 'connected') {
-    clearTimeout(c.timers.connect);
-    clearTimeout(c.timers.disconnect);
+    clearTimer(c, 'connect');
+    clearTimer(c, 'disconnect');
+    clearTimer(c, 'restart');
     $('call-quality').hidden = true;
     if (!c.connectedAt) {
       c.connectedAt = Date.now();
@@ -470,16 +570,13 @@ function onConnectionState(c, state) {
     c.peer.sendControl({ type: 'mic', enabled: c.micOn });
     if (c.type === 'video') c.peer.sendControl({ type: 'camera', enabled: c.cameraOn });
   } else if (state === 'disconnected') {
-    $('call-quality').hidden = false;
-    setCallStatus(c, 'Reconnecting…');
-    clearTimeout(c.timers.disconnect);
-    c.timers.disconnect = setTimeout(() => {
-      if (isActive(c)) failCall(c, 'Connection lost.');
-    }, DISCONNECT_GRACE_MS);
+    if (!c.connectedAt) {
+      $('call-quality').hidden = false;
+      setCallStatus(c, 'Reconnecting…');
+    }
+    handleDrop(c, false);
   } else if (state === 'failed') {
-    failCall(c, c.connectedAt
-      ? 'Connection lost.'
-      : 'Could not connect. The networks may block direct connections — a TURN relay is needed (see README).');
+    handleDrop(c, true);
   }
 }
 
@@ -583,12 +680,37 @@ function showCallScreen(c) {
   setToggle($('toggle-camera'), false, 'Turn camera off', 'Turn camera on');
   screen.hidden = false;
   $('end-call').focus({ preventScroll: true });
+  updateAudioRoute();
+}
+
+/**
+ * Honest audio-privacy indicator. Browsers cannot force the phone earpiece, block the
+ * loudspeaker, or reliably tell which output a call uses. The app never selects the
+ * loudspeaker itself; it shows "Headphones detected" only when the browser reports a
+ * headset as the output in use (mostly desktop, where device names are exposed), and
+ * otherwise warns that audio may play on the loudspeaker.
+ */
+async function updateAudioRoute() {
+  const pill = $('call-audio-route');
+  let headset = false;
+  try {
+    const outputs = (await navigator.mediaDevices.enumerateDevices()).filter((d) => d.kind === 'audiooutput');
+    const chosenId = supportsSinkId ? getPrefs().speakerId : '';
+    const inUse = outputs.find((d) => d.deviceId === (chosenId || 'default')) || (outputs.length === 1 ? outputs[0] : null);
+    headset = !!inUse && HEADSET_LABEL.test(inUse.label);
+  } catch { /* unknown → warn */ }
+  if (!active) return;
+  pill.hidden = false;
+  pill.classList.toggle('warn', !headset);
+  pill.title = 'Browsers cannot force the earpiece or block the loudspeaker. Use wired or Bluetooth headphones for private call audio.';
+  pill.lastChild.textContent = headset ? ' Headphones detected' : ' May play on loudspeaker — use headphones';
 }
 
 function hideCallScreen() {
   const screen = $('call-screen');
   screen.hidden = true;
   screen.classList.remove('has-remote-video');
+  $('call-audio-route').hidden = true;
   for (const id of ['remote-video', 'remote-audio', 'local-video']) {
     const el = $(id);
     el.pause?.();
@@ -748,6 +870,14 @@ function bindUi() {
 
   makeDraggable($('local-preview'));
 
+  // Headphones plugged in / Bluetooth connected during a call.
+  navigator.mediaDevices?.addEventListener?.('devicechange', () => { if (active) updateAudioRoute(); });
+  // Network is back: try a new path right away instead of waiting.
+  window.addEventListener('online', () => {
+    const c = active;
+    if (c?.connectedAt && c.peer?.lastState !== 'connected') restartIce(c);
+  });
+
   // Best effort: tell the other side we left if the tab is closed mid-call.
   window.addEventListener('pagehide', () => { if (active) hangUp(); });
   window.addEventListener('beforeunload', (e) => {
@@ -766,6 +896,7 @@ function watchHistory(previousLastActive) {
   const q = query(
     collection(db, 'calls'),
     where('participants', 'array-contains', ctx.myUid),
+    ...(callsClearedAt ? [where('createdAt', '>', Timestamp.fromDate(callsClearedAt))] : []),
     orderBy('createdAt', 'desc'),
     limit(15),
   );
@@ -784,6 +915,34 @@ function watchHistory(previousLastActive) {
       ? 'Call history needs a Firestore index (see README → Indexes).'
       : 'Call history is unavailable.';
   });
+}
+
+/** My profile's callsClearedAt changed: show only calls after it. */
+export function setCallsClearedAt(date) {
+  if (!ctx || !date || date.getTime() === callsClearedAt?.getTime()) return;
+  callsClearedAt = date;
+  unsubHistory?.();
+  watchHistory(null);
+}
+
+/**
+ * "Clear call history for everyone": deletes every finished call document of ours.
+ * Ringing/active calls are kept (the rules refuse them too); their leftover ICE
+ * candidate documents expire through the TTL policy.
+ */
+export async function eraseCallHistory() {
+  const snap = await getDocs(query(collection(db, 'calls'), where('participants', 'array-contains', ctx.myUid)));
+  const dayAgo = Date.now() - 86400_000;
+  const erasable = snap.docs.filter((s) => {
+    const d = s.data();
+    return s.id !== active?.id
+      && (!['ringing', 'accepted'].includes(d.status) || (d.updatedAt?.toMillis?.() || 0) < dayAgo);
+  });
+  for (let i = 0; i < erasable.length; i += DELETE_BATCH) {
+    const batch = writeBatch(db);
+    erasable.slice(i, i + DELETE_BATCH).forEach((s) => batch.delete(s.ref));
+    await batch.commit();
+  }
 }
 
 function isMissedForMe(d) {

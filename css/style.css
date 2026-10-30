@@ -320,3 +320,14 @@ svg { width: 20px; height: 20px; flex-shrink: 0; }
 @keyframes toast-out { to { opacity: 0; transform: translateY(-10px); } }
 
 .noscript { position: fixed; inset: 0; display: grid; place-items: center; background: var(--bg); }
+
+/* ---------- Dialogs above the call screens, install button, notification codes ---------- */
+.modal.over-calls { z-index: 90; }
+.pre-line { white-space: pre-line; }
+.modal-actions.stack { flex-direction: column-reverse; align-items: stretch; }
+.install-btn { margin-top: 14px; }
+.install-btn svg, #install-btn-settings svg, #clear-history-btn svg { width: 17px; height: 17px; }
+.code-form { display: flex; flex-direction: column; gap: 12px; padding-top: 4px; }
+.code-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.code-form code { font-size: 12px; }
+.form-actions { display: flex; justify-content: flex-end; gap: 10px; flex-wrap: wrap; }

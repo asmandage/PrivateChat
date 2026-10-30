@@ -106,6 +106,57 @@ export function confirmDialog({ title, text, okLabel = 'Confirm', danger = true 
   });
 }
 
+/**
+ * Dialog with several choices, e.g. "Delete for me" / "Delete for everyone".
+ * Resolves the chosen value, or null when cancelled.
+ * choices: [{ value, label, danger? }]
+ */
+export function choiceDialog({ title, text, choices, cancelLabel = 'Cancel' }) {
+  return new Promise((resolve) => {
+    const modal = $('choice-modal');
+    $('choice-title').textContent = title;
+    $('choice-text').textContent = text;
+    const actions = $('choice-actions');
+    actions.replaceChildren();
+    actions.classList.toggle('stack', choices.length > 1);
+
+    const finish = (result) => {
+      modal.querySelectorAll('[data-cancel]').forEach((el) => el.removeEventListener('click', onCancel));
+      document.removeEventListener('keydown', onKey);
+      closeModal('choice-modal');
+      resolve(result);
+    };
+    const onCancel = () => finish(null);
+    const onKey = (e) => { if (e.key === 'Escape') finish(null); };
+
+    for (const choice of choices) {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = `btn ${choice.danger ? 'btn-danger' : choices.length > 1 ? 'btn-secondary' : 'btn-primary'}`;
+      btn.textContent = choice.label;
+      btn.addEventListener('click', () => finish(choice.value));
+      actions.append(btn);
+    }
+    if (cancelLabel) {
+      const cancel = document.createElement('button');
+      cancel.type = 'button';
+      cancel.className = 'btn btn-secondary';
+      cancel.textContent = cancelLabel;
+      cancel.dataset.cancel = '';
+      actions.append(cancel);
+    }
+    modal.querySelectorAll('[data-cancel]').forEach((el) => el.addEventListener('click', onCancel));
+    document.addEventListener('keydown', onKey);
+    openModal('choice-modal');
+    actions.firstElementChild?.focus();
+  });
+}
+
+/** Message with a single OK button. */
+export function infoDialog({ title, text, okLabel = 'OK' }) {
+  return choiceDialog({ title, text, choices: [{ value: true, label: okLabel }], cancelLabel: '' });
+}
+
 /* ---------- Avatars ---------- */
 const AVATAR_GRADIENTS = [
   ['#5b5ef0', '#8b5cf6'], ['#0ea5e9', '#6366f1'], ['#f43f5e', '#f97316'],

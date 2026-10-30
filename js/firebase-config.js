@@ -25,11 +25,20 @@ export const FIREBASE_CONFIG = {
   appId: '1:56735281511:web:0b6ff8aa9d5c5395693fc2',
 };
 
-/** Exactly two Firebase Authentication UIDs. Must match firestore.rules. */
+/** Exactly two Firebase Authentication UIDs. Must match firestore.rules and functions/index.js. */
 export const ALLOWED_UIDS = [
-  'wxC2B1XFgtaoIFOVTUjhBOAxoKi1', // trory663@gmail.com
-  'Ce6xiyk5gJenhC3eRNcVnnCJr6t1', // anidoe325@gmail.com
+  'wxC2B1XFgtaoIFOVTUjhBOAxoKi1', // person 1
+  'Ce6xiyk5gJenhC3eRNcVnnCJr6t1', // person 2
 ];
+
+/**
+ * Background push (Firebase Cloud Messaging). Paste the PUBLIC key from
+ * Firebase console → Project settings → Cloud Messaging → Web Push certificates.
+ * It is public by design. Leave empty to disable background push; coded
+ * notifications then only appear while the app is open (e.g. in a background tab).
+ * Background push also needs the Cloud Functions in functions/ (Blaze plan) — see README.
+ */
+export const FCM_VAPID_KEY = '';
 
 /**
  * Optional Firebase App Check (reCAPTCHA v3) site key. Leave empty to disable.
@@ -65,4 +74,4 @@ export const ICE_TRANSPORT_POLICY = 'all';
 /** The single shared conversation document id. Must match firestore.rules. */
 export const CONVERSATION_ID = 'main';
 
-export const APP_VERSION = '1.0.0';
+export const APP_VERSION = '2.0.0';

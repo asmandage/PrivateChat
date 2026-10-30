@@ -1,0 +1,95 @@
+/**
+ * Coded notification texts ("Special Offer Update — Your code M101 is available").
+ *
+ * Stored on THIS device only, in IndexedDB so the service worker can read them while
+ * the app is closed. They are never sent to Firebase: a push only carries the event
+ * kind, and the device turns it into this text. Keep DEFAULT_NOTIFY_CONFIG and the
+ * database names in sync with sw.js.
+ */
+
+const DB_NAME = 'privatechat-notify';
+const STORE = 'kv';
+const KEY = 'config';
+
+/** Event kinds: m = new message, a = audio call, v = video call, mc = missed call. */
+export const NOTIFY_KINDS = ['m', 'a', 'v', 'mc'];
+
+/** Calls share one tag so "missed" replaces the "incoming" notification. */
+export const NOTIFY_TAGS = { m: 'pc-m', a: 'pc-c', v: 'pc-c', mc: 'pc-c' };
+
+export const DEFAULT_NOTIFY_CONFIG = {
+  title: 'Special Offer Update',
+  body: 'Your code {code} is available',
+  codes: { m: 'M101', a: 'C101', v: 'V101', mc: 'MC101' },
+  silent: false,
+};
+
+export const CODE_PATTERN = /^[A-Za-z0-9-]{1,12}$/;
+
+const clean = (value, max, fallback) => {
+  const text = typeof value === 'string' ? value.replace(/\s+/g, ' ').trim().slice(0, max) : '';
+  return text || fallback;
+};
+
+/** Fills gaps with defaults and enforces lengths/charset, whatever was stored. */
+export function normalizeConfig(raw) {
+  const d = DEFAULT_NOTIFY_CONFIG;
+  const codes = {};
+  for (const k of NOTIFY_KINDS) {
+    const code = typeof raw?.codes?.[k] === 'string' ? raw.codes[k].trim() : '';
+    codes[k] = CODE_PATTERN.test(code) ? code : d.codes[k];
+  }
+  return {
+    title: clean(raw?.title, 40, d.title),
+    body: clean(raw?.body, 80, d.body),
+    codes,
+    silent: raw?.silent === true,
+  };
+}
+
+export function renderNotification(config, kind) {
+  const cfg = normalizeConfig(config);
+  return { title: cfg.title, body: cfg.body.split('{code}').join(cfg.codes[kind] || cfg.codes.m) };
+}
+
+function openDb() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(DB_NAME, 1);
+    req.onupgradeneeded = () => req.result.createObjectStore(STORE);
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+let cached = null;
+
+export async function getNotifyConfig() {
+  if (cached) return cached;
+  try {
+    const dbh = await openDb();
+    const raw = await new Promise((resolve, reject) => {
+      const req = dbh.transaction(STORE).objectStore(STORE).get(KEY);
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+    });
+    dbh.close();
+    cached = normalizeConfig(raw);
+  } catch {
+    cached = normalizeConfig(null);   // private mode / storage blocked: defaults still work
+  }
+  return cached;
+}
+
+export async function setNotifyConfig(config) {
+  const value = normalizeConfig(config);
+  const dbh = await openDb();
+  await new Promise((resolve, reject) => {
+    const tx = dbh.transaction(STORE, 'readwrite');
+    tx.objectStore(STORE).put(value, KEY);
+    tx.oncomplete = resolve;
+    tx.onerror = () => reject(tx.error);
+  });
+  dbh.close();
+  cached = value;
+  return value;
+}

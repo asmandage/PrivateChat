@@ -3,12 +3,11 @@
  * at ONE pinned version so no build step or npm install is needed.
  */
 import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js';
-import { getAuth } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js';
+import { initializeAuth, browserSessionPersistence } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js';
 import {
   initializeFirestore,
-  persistentLocalCache,
-  persistentMultipleTabManager,
   memoryLocalCache,
+  clearIndexedDbPersistence,
 } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js';
 import { FIREBASE_CONFIG, APP_CHECK_SITE_KEY } from './firebase-config.js';
 
@@ -19,21 +18,20 @@ export function isConfigured() {
 }
 
 export const app = initializeApp(FIREBASE_CONFIG);
-export const auth = getAuth(app);
 
-// The offline cache lets reloads read messages from IndexedDB instead of re-downloading
-// them (fewer billed reads). It is unavailable in some private-browsing modes.
-function createFirestore() {
-  try {
-    return initializeFirestore(app, {
-      localCache: persistentLocalCache({ tabManager: persistentMultipleTabManager() }),
-    });
-  } catch (err) {
-    console.warn('Persistent Firestore cache unavailable, using memory cache.', err?.code || '');
-    return initializeFirestore(app, { localCache: memoryLocalCache() });
-  }
-}
-export const db = createFirestore();
+// The sign-in lives in sessionStorage only: closing the browser tab, the browser or
+// the installed app ends it, and the password is needed again. (Some browsers restore
+// sessionStorage after a restart; session.js guards against that.)
+export const auth = initializeAuth(app, { persistence: browserSessionPersistence });
+
+// Messages are cached in memory only, so nothing private stays on the device once the
+// app is closed or signed out. Writes made while offline still queue until reconnect.
+export const db = initializeFirestore(app, { localCache: memoryLocalCache() });
+
+// Earlier versions kept the conversation in an IndexedDB cache and the sign-in in
+// IndexedDB ("stay signed in"). Remove both once.
+try { clearIndexedDbPersistence(db).catch(() => {}); } catch { /* already started */ }
+try { indexedDB.deleteDatabase('firebaseLocalStorageDb'); } catch { /* storage unavailable */ }
 
 /** Optional App Check (loaded lazily so the SDK is only fetched when configured). */
 export async function initAppCheck() {

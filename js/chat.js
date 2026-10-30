@@ -8,6 +8,13 @@
  *  - Messages are immutable except "delete for everyone", which blanks the text.
  *  - Read/delivered ticks come from the peer's lastReadAt / lastDeliveredAt markers,
  *    so receipts cost no extra writes per message.
+ *  - Deleting:
+ *      single message, for me        → users/{me}/hiddenMessages/{id}
+ *      single message, for everyone  → sender blanks it (existing behaviour)
+ *      whole conversation, for me    → users/{me}.clearedAt; queries only ask for newer messages
+ *      whole conversation, everyone  → every message document is deleted, then
+ *                                      users/{me}.wipedAt tells the other app to reload
+ *    All markers live in Firestore, so deletions survive refresh and new logins.
  */
 import {
   collection,
@@ -15,24 +22,27 @@ import {
   setDoc,
   updateDoc,
   query,
+  where,
   orderBy,
   limit,
   startAfter,
   getDocs,
   onSnapshot,
+  writeBatch,
   serverTimestamp,
+  Timestamp,
 } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js';
 import { db } from './firebase.js';
 import { CONVERSATION_ID } from './firebase-config.js';
 import {
-  $, icon, toast, confirmDialog, friendlyError,
+  $, icon, toast, choiceDialog, friendlyError,
   formatTime, formatDayLabel, formatListTime, dayKey,
 } from './ui.js';
-import { notifyTyping, stopTyping, markRead, markDelivered, serverNow } from './presence.js';
-import { playMessageSound, notify, setUnread, closeNotification } from './notifications.js';
-import { getPrefs } from './settings.js';
+import { notifyTyping, stopTyping, markRead, markDelivered, serverNow, stampUserFields } from './presence.js';
+import { playMessageSound, notifyPrivate, setUnread, closeNotification } from './notifications.js';
 
 const PAGE_SIZE = 30;
+const DELETE_BATCH = 100;
 export const MAX_MESSAGE_LENGTH = 4000;
 const COLLAPSE_CHARS = 1200;
 const COLLAPSE_LINES = 25;
@@ -58,25 +68,35 @@ let newBelowCount = 0;
 let chatShown = true;
 let uiBound = false;
 let olderObserver = null;
-let generation = 0;          // invalidates async work from a previous session
+let generation = 0;          // invalidates async work from a previous session / reload
+let clearedAt = null;        // Date: everything up to here is deleted for me
+let hiddenIds = new Set();   // single messages deleted for me
+let unsubHidden = null;
+let deleting = false;
 
 /* ======================================================================
    Lifecycle
    ====================================================================== */
 
-export function initChat({ myUid, peerUid, getPeerName, myLastReadAt }) {
+export function initChat({ myUid, peerUid, getPeerName, myLastReadAt, myClearedAt }) {
   destroyChat();
   generation++;
   ctx = { myUid, peerUid, getPeerName };
   myLastRead = myLastReadAt || null;
+  clearedAt = myClearedAt || null;
   bindUi();
   showState('loading');
-  subscribeLive();
+  // Load the "deleted for me" list first so hidden messages never flash on screen.
+  subscribeHidden(() => subscribeLive());
 }
 
 export function destroyChat() {
   unsubLive?.();
   unsubLive = null;
+  unsubHidden?.();
+  unsubHidden = null;
+  hiddenIds = new Set();
+  clearedAt = null;
   olderObserver?.disconnect();
   olderObserver = null;
   messages = new Map();
@@ -99,9 +119,28 @@ export function destroyChat() {
   setUnread(0);
 }
 
+/** Newest-first message query, without anything I deleted "for me" (clearedAt). */
+function messagesQuery(...constraints) {
+  const newer = clearedAt ? [where('createdAt', '>', Timestamp.fromDate(clearedAt))] : [];
+  return query(messagesCol(), ...newer, orderBy('createdAt', 'desc'), ...constraints);
+}
+
+function subscribeHidden(onReady) {
+  let ready = false;
+  const done = () => { if (!ready) { ready = true; onReady(); } };
+  unsubHidden = onSnapshot(collection(db, 'users', ctx.myUid, 'hiddenMessages'), (snap) => {
+    hiddenIds = new Set(snap.docs.map((d) => d.id));
+    if (initialLoaded) refreshView();
+    done();
+  }, (err) => {
+    console.error('Hidden-messages listener error:', err?.code);
+    done();
+  });
+}
+
 function subscribeLive() {
   const gen = generation;
-  const q = query(messagesCol(), orderBy('createdAt', 'desc'), limit(PAGE_SIZE));
+  const q = messagesQuery(limit(PAGE_SIZE));
   unsubLive = onSnapshot(q, { includeMetadataChanges: true }, (snap) => {
     if (gen !== generation) return;
     const wasNearBottom = isNearBottom();
@@ -109,9 +148,12 @@ function subscribeLive() {
     let ownAdded = false;
 
     for (const change of snap.docChanges({ includeMetadataChanges: true })) {
-      // 'removed' only happens when a message slides out of the live window
-      // (deletes are forbidden by the rules), so we keep it in memory.
-      if (change.type === 'removed') continue;
+      if (change.type === 'removed') {
+        // In a full window a removal is usually a message sliding out of it, which
+        // stays in memory. In a partly filled window it can only be a real deletion.
+        if (snap.size < PAGE_SIZE) messages.delete(change.doc.id);
+        continue;
+      }
       const msg = toMessage(change.doc);
       const existed = messages.has(msg.id);
       messages.set(msg.id, msg);
@@ -137,7 +179,7 @@ function subscribeLive() {
     const firstRender = !initialLoaded;
     initialLoaded = true;
     render();
-    showState(messages.size ? 'list' : 'empty');
+    showState(visibleMessages().length ? 'list' : 'empty');
 
     if (firstRender) {
       scrollToBottom();
@@ -192,11 +234,9 @@ function handleIncoming(incoming, wasNearBottom) {
     playMessageSound();
   } else {
     playMessageSound();
-    const latest = incoming[incoming.length - 1];
-    const name = ctx.getPeerName();
-    const body = latest.deleted ? 'Message deleted' : getPrefs().notifyPreview ? latest.text.slice(0, 140) : 'New message';
-    notify('message', name, body);
-    if (document.visibilityState === 'visible' && !chatShown) toast(`New message from ${name}`);
+    // Coded text only: never the sender's name or the message.
+    notifyPrivate('m');
+    if (document.visibilityState === 'visible' && !chatShown) toast(`New message from ${ctx.getPeerName()}`);
     if (!wasNearBottom) bumpNewBelow(incoming.length);
   }
   refreshUnreadAndReceipts();
@@ -205,12 +245,12 @@ function handleIncoming(incoming, wasNearBottom) {
 function markReadNow() {
   myLastRead = new Date(serverNow());
   markRead();
-  closeNotification('message');
+  closeNotification('m');
 }
 
 function refreshUnreadAndReceipts() {
   if (!ctx) return;
-  const peerMessages = [...messages.values()].filter((m) => m.senderId === ctx.peerUid);
+  const peerMessages = visibleMessages().filter((m) => m.senderId === ctx.peerUid);
   // Only write a delivery receipt when a newer peer message has actually arrived.
   const newest = peerMessages.reduce((max, m) => (!max || m.createdAt > max ? m.createdAt : max), null);
   if (newest && (!deliveredUpTo || newest > deliveredUpTo)) {
@@ -260,8 +300,18 @@ export function setPeerTyping(typing) {
    Rendering
    ====================================================================== */
 
-function sortedMessages() {
-  return [...messages.values()].sort((a, b) => a.createdAt - b.createdAt || (a.id < b.id ? -1 : 1));
+/** Messages to show, oldest first: without anything deleted for me. */
+function visibleMessages() {
+  return [...messages.values()]
+    .filter((m) => !hiddenIds.has(m.id) && (!clearedAt || m.pending || m.createdAt > clearedAt))
+    .sort((a, b) => a.createdAt - b.createdAt || (a.id < b.id ? -1 : 1));
+}
+
+function refreshView() {
+  render();
+  showState(visibleMessages().length ? 'list' : 'empty');
+  updateSidebarPreview();
+  refreshUnreadAndReceipts();
 }
 
 function render() {
@@ -270,7 +320,7 @@ function render() {
   let prev = null;
   const usedDays = new Set();
 
-  for (const msg of sortedMessages()) {
+  for (const msg of visibleMessages()) {
     const key = dayKey(msg.createdAt);
     if (!prev || dayKey(prev.createdAt) !== key) {
       desired.push(getDaySep(key, msg.createdAt));
@@ -345,17 +395,18 @@ function buildNode(msg) {
     const status = document.createElement('span');
     status.className = 'msg-status';
     meta.append(status);
-
-    const del = document.createElement('button');
-    del.type = 'button';
-    del.className = 'icon-btn small msg-delete';
-    del.setAttribute('aria-label', 'Delete message for everyone');
-    del.title = 'Delete for everyone';
-    del.append(icon('i-trash'));
-    del.addEventListener('click', (e) => { e.stopPropagation(); deleteMessage(msg.id); });
-    bubble.append(del);
-    bubble.addEventListener('click', () => onOwnBubbleClick(msg.id, li));
   }
+
+  const del = document.createElement('button');
+  del.type = 'button';
+  del.className = 'icon-btn small msg-delete';
+  del.setAttribute('aria-label', 'Delete message');
+  del.title = 'Delete';
+  del.append(icon('i-trash'));
+  del.addEventListener('click', (e) => { e.stopPropagation(); deleteMessage(msg.id); });
+  bubble.append(del);
+  bubble.addEventListener('click', () => (mine ? onOwnBubbleClick(msg.id, li) : li.classList.toggle('show-actions')));
+
   li.append(bubble);
   return li;
 }
@@ -409,8 +460,8 @@ function updateNode(msg, li = nodes.get(msg.id)) {
       status.title = status.getAttribute('aria-label');
     }
     li.classList.toggle('failed', msg.failed);
-    li.querySelector('.msg-delete').hidden = msg.deleted || msg.pending || msg.failed;
   }
+  li.querySelector('.msg-delete').hidden = msg.pending || msg.failed;
 }
 
 function messageStatus(msg) {
@@ -422,7 +473,7 @@ function messageStatus(msg) {
 }
 
 function updateSidebarPreview() {
-  const ordered = sortedMessages();
+  const ordered = visibleMessages();
   const last = ordered[ordered.length - 1];
   const preview = $('contact-preview');
   if (preview.classList.contains('typing')) return;
@@ -504,7 +555,7 @@ async function loadOlder() {
   btn.disabled = true;
   btn.textContent = 'Loading…';
   try {
-    const q = query(messagesCol(), orderBy('createdAt', 'desc'), startAfter(oldestCursor), limit(PAGE_SIZE));
+    const q = messagesQuery(startAfter(oldestCursor), limit(PAGE_SIZE));
     const snap = await getDocs(q);
     if (gen !== generation) return;
     const scroller = $('messages-scroller');
@@ -584,18 +635,127 @@ function onOwnBubbleClick(id, li) {
 
 async function deleteMessage(id) {
   const msg = messages.get(id);
-  if (!msg || msg.deleted || msg.pending) return;
-  const ok = await confirmDialog({
+  if (!msg || msg.pending || !ctx) return;
+  // "Delete for everyone" is offered for my own messages only (the rules enforce it).
+  const forEveryone = msg.senderId === ctx.myUid && !msg.deleted;
+  const choice = await choiceDialog({
     title: 'Delete message?',
-    text: 'It will be replaced with “This message was deleted” for both of you.',
-    okLabel: 'Delete for everyone',
+    text: forEveryone
+      ? 'Delete for me: removed from your view only.\nDelete for everyone: replaced with “This message was deleted” for both of you.'
+      : 'It will be removed from your view on every device you sign in to. The other person still sees it.',
+    choices: [
+      { value: 'me', label: 'Delete for me' },
+      ...(forEveryone ? [{ value: 'everyone', label: 'Delete for everyone', danger: true }] : []),
+    ],
   });
-  if (!ok) return;
+  if (choice === 'me') {
+    await hideForMe(id);
+  } else if (choice === 'everyone') {
+    try {
+      await updateDoc(doc(messagesCol(), id), { text: '', deleted: true, deletedAt: serverTimestamp() });
+    } catch (err) {
+      toast(friendlyError(err, 'Could not delete the message.'), { type: 'error' });
+    }
+  }
+}
+
+async function hideForMe(id) {
+  if (!ctx || hiddenIds.has(id)) return;
+  hiddenIds.add(id);   // optimistic; the hiddenMessages listener confirms it
+  refreshView();
   try {
-    await updateDoc(doc(messagesCol(), id), { text: '', deleted: true, deletedAt: serverTimestamp() });
+    await setDoc(doc(db, 'users', ctx.myUid, 'hiddenMessages', id), { createdAt: serverTimestamp() });
   } catch (err) {
+    hiddenIds.delete(id);
+    if (ctx) refreshView();
     toast(friendlyError(err, 'Could not delete the message.'), { type: 'error' });
   }
+}
+
+/** Drops everything shown and loads the conversation again (after a clear or wipe). */
+export function reloadChat() {
+  if (!ctx) return;
+  generation++;
+  unsubLive?.();
+  unsubLive = null;
+  messages = new Map();
+  nodes = new Map();
+  daySeps = new Map();
+  oldestCursor = null;
+  hasMore = false;
+  initialLoaded = false;
+  serverSeen = false;
+  newBelowCount = 0;
+  $('message-list').replaceChildren();
+  $('scroll-bottom').hidden = true;
+  showState('loading');
+  subscribeLive();
+}
+
+/** My profile's clearedAt changed (here or on another of my sign-ins). */
+export function setClearedAt(date) {
+  if (!date || date.getTime() === clearedAt?.getTime()) return;
+  clearedAt = date;
+  reloadChat();
+}
+
+/** Deletes every document a query returns, in batches (one request per batch). */
+async function deleteAll(ref) {
+  for (;;) {
+    const snap = await getDocs(query(ref, limit(DELETE_BATCH)));
+    if (snap.empty) return;
+    const batch = writeBatch(db);
+    snap.docs.forEach((d) => batch.delete(d.ref));
+    await batch.commit();
+    if (snap.size < DELETE_BATCH) return;
+  }
+}
+
+/** "Delete conversation for me". extraFields lets "clear all" stamp callsClearedAt too. */
+export async function clearMessagesForMe(extraFields = []) {
+  const uid = ctx.myUid;
+  await stampUserFields(['clearedAt', ...extraFields]);
+  // clearedAt now covers every single-message marker, so they can go.
+  await deleteAll(collection(db, 'users', uid, 'hiddenMessages'));
+}
+
+/** "Delete conversation for everyone": permanently erases every message for both people. */
+export async function eraseMessagesForEveryone() {
+  const uid = ctx.myUid;
+  await deleteAll(messagesCol());
+  await deleteAll(collection(db, 'users', uid, 'hiddenMessages'));
+  await stampUserFields(['wipedAt']);   // makes the other person's app reload its view
+}
+
+/** Runs a deletion with progress/result toasts; one at a time. */
+export async function runDeletion(task, doneText) {
+  if (deleting || !ctx) return;
+  if (!navigator.onLine) { toast('You are offline. Connect to delete history.', { type: 'warning' }); return; }
+  deleting = true;
+  const dismiss = toast('Deleting…', { duration: 0 });
+  try {
+    await task();
+    toast(doneText, { type: 'success' });
+  } catch (err) {
+    toast(friendlyError(err, 'Could not delete everything. Please try again.'), { type: 'error' });
+  } finally {
+    dismiss();
+    deleting = false;
+  }
+}
+
+async function confirmDeleteConversation() {
+  if (!ctx) return;
+  const choice = await choiceDialog({
+    title: 'Delete this conversation?',
+    text: 'Delete for me: every message disappears from your view, on every device you sign in to. The other person keeps theirs.\n\nDelete for everyone: every message is permanently erased for both of you. This cannot be undone.',
+    choices: [
+      { value: 'me', label: 'Delete for me' },
+      { value: 'everyone', label: 'Delete for everyone', danger: true },
+    ],
+  });
+  if (choice === 'me') await runDeletion(() => clearMessagesForMe(), 'Conversation deleted for you.');
+  else if (choice === 'everyone') await runDeletion(eraseMessagesForEveryone, 'Conversation deleted for everyone.');
 }
 
 /* ======================================================================
@@ -670,6 +830,7 @@ function bindUi() {
   });
 
   $('load-older').addEventListener('click', loadOlder);
+  $('delete-chat-btn').addEventListener('click', confirmDeleteConversation);
 
   $('messages-retry').addEventListener('click', () => {
     if (!ctx) return;
