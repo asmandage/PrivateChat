@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-  <meta name="description" content="A private chat, audio and video calling space for two." />
+  <meta name="description" content="A My Offers chat, audio and video calling space for two." />
   <meta name="theme-color" content="#5b5ef0" />
   <meta name="referrer" content="strict-origin-when-cross-origin" />
   <meta http-equiv="Content-Security-Policy"
@@ -88,8 +88,8 @@
       <div class="login-brand">
         <div class="brand-mark"><svg><use href="#i-logo"/></svg></div>
         <div>
-          <h1 id="login-title">PrivateChat</h1>
-          <p class="muted">A private space for exactly two people.</p>
+          <h1 id="login-title">My Offers</h1>
+          <p class="muted">A My Offers space for exactly two people.</p>
         </div>
       </div>
 
@@ -232,7 +232,7 @@
         <div id="messages-empty" class="messages-empty" hidden>
           <div class="empty-illustration"><svg><use href="#i-logo"/></svg></div>
           <h2>Say hello 👋</h2>
-          <p class="muted">This conversation is private between the two of you. Send the first message.</p>
+          <p class="muted">This conversation is Offers between the two of you. Send the first message.</p>
         </div>
         <div id="messages-error" class="messages-error" hidden role="alert">
           <svg><use href="#i-alert"/></svg>
@@ -352,7 +352,7 @@
           <h3>Notifications</h3>
           <label class="switch-row"><span>Message sounds</span><input type="checkbox" id="pref-message-sound" class="switch" /></label>
           <label class="switch-row"><span>Ringtone for incoming calls</span><input type="checkbox" id="pref-ringtone" class="switch" /></label>
-          <label class="switch-row"><span>Private notifications</span><input type="checkbox" id="pref-browser-notify" class="switch" /></label>
+          <label class="switch-row"><span>My Offers notifications</span><input type="checkbox" id="pref-browser-notify" class="switch" /></label>
           <p id="notify-permission-note" class="muted small"></p>
           <p class="muted small">Notifications never show names, message text or call details — only the coded text below. Tapping one just dismisses it; open the app yourself to see what happened.</p>
           <p id="push-note" class="muted small"></p>
@@ -382,7 +382,7 @@
           <label class="field" id="speaker-field"><span>Speaker</span><select id="pref-speaker"></select></label>
           <button id="refresh-devices" class="btn btn-secondary" type="button">Detect devices</button>
           <p class="muted small" id="devices-note">Device names appear after you grant camera/microphone permission once.</p>
-          <p class="muted small">Private call audio: browsers cannot force the phone earpiece or block the loudspeaker, and on many phones call audio plays on the loudspeaker unless headphones are connected. Use wired or Bluetooth headphones for private calls. The app never switches to the loudspeaker itself.</p>
+          <p class="muted small">My offers call audio: browsers cannot force the phone earpiece or block the loudspeaker, and on many phones call audio plays on the loudspeaker unless headphones are connected. Use wired or Bluetooth headphones for private calls. The app never switches to the loudspeaker itself.</p>
         </section>
 
         <section class="settings-group">
@@ -400,7 +400,7 @@
         <section class="settings-group">
           <h3>About</h3>
           <dl class="about-list">
-            <dt>Application</dt><dd>PrivateChat <span id="app-version"></span></dd>
+            <dt>Application</dt><dd>My Offers <span id="app-version"></span></dd>
             <dt>Messaging</dt><dd>Cloud Firestore (real-time)</dd>
             <dt>Calls</dt><dd>WebRTC peer-to-peer, encrypted with DTLS-SRTP</dd>
             <dt>Relay (TURN)</dt><dd id="turn-status">—</dd>
@@ -443,7 +443,7 @@
 
   <div id="toast-region" class="toast-region" aria-live="polite" aria-atomic="false"></div>
 
-  <noscript><div class="noscript">PrivateChat requires JavaScript.</div></noscript>
+  <noscript><div class="noscript">My Offers requires JavaScript.</div></noscript>
 
   <script type="module" src="js/app.js"></script>
 </body>
