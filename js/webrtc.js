@@ -212,6 +212,31 @@ export class PeerSession {
     await this.flushRemoteCandidates();
   }
 
+  /**
+   * ICE restart after a network change (Wi-Fi ↔ mobile data, short outage). The caller
+   * creates an offer with fresh ICE credentials; the callee answers it; media keeps
+   * flowing on the same connection once a new path is found. Returns null if the
+   * connection is mid-negotiation.
+   */
+  async createRestartOffer() {
+    if (this.closed || this.pc.signalingState !== 'stable') return null;
+    const offer = await this.pc.createOffer({ iceRestart: true });
+    await this.pc.setLocalDescription(offer);
+    return { type: offer.type, sdp: offer.sdp };
+  }
+
+  async acceptRestartOffer(offer) {
+    await this.pc.setRemoteDescription(new RTCSessionDescription(offer));
+    const answer = await this.pc.createAnswer();
+    await this.pc.setLocalDescription(answer);
+    return { type: answer.type, sdp: answer.sdp };
+  }
+
+  async applyRestartAnswer(answer) {
+    if (this.closed || this.pc.signalingState !== 'have-local-offer') return;
+    await this.pc.setRemoteDescription(new RTCSessionDescription(answer));
+  }
+
   /** Candidates can arrive before the remote description; queue them until then. */
   async addRemoteCandidate(data) {
     if (this.closed) return;

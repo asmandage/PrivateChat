@@ -217,3 +217,7 @@
 .send-btn:disabled { opacity: 0.45; box-shadow: none; filter: grayscale(0.4); }
 .send-btn:active:not(:disabled) { transform: scale(0.92); }
 .send-btn svg { width: 21px; height: 21px; margin-left: 2px; }
+
+/* Delete action on received messages sits on the right of the bubble. */
+.msg.in .msg-delete { left: auto; right: -40px; }
+.msg.in:hover .msg-delete { opacity: 1; }

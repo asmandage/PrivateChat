@@ -17,7 +17,7 @@ import {
 } from '@firebase/rules-unit-testing';
 import {
   doc, getDoc, getDocs, setDoc, updateDoc, deleteDoc, collection, query, where, orderBy, limit,
-  serverTimestamp, Timestamp,
+  serverTimestamp, Timestamp, writeBatch,
 } from 'firebase/firestore';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -33,8 +33,12 @@ if (!A || A.startsWith('REPLACE_WITH')) {
 }
 const MALLORY = 'mallory-uid';
 
+// Every test request is made from the account's active sign-in (auth_time T) unless
+// a test passes another auth_time to simulate an older or newer device.
+const T = 1_700_000_000;
+
 let env;
-const as = (uid) => env.authenticatedContext(uid).firestore();
+const as = (uid, authTime = T) => env.authenticatedContext(uid, { auth_time: authTime }).firestore();
 const anon = () => env.unauthenticatedContext().firestore();
 const msgRef = (db, id = 'm1', conv = 'main') => doc(db, 'conversations', conv, 'messages', id);
 const OFFER = { type: 'offer', sdp: 'v=0\r\no=- 1 2 IN IP4 127.0.0.1\r\n' };
@@ -63,7 +67,45 @@ before(async () => {
   });
 });
 after(async () => { await env?.cleanup(); });
-beforeEach(async () => { await env.clearFirestore(); });
+beforeEach(async () => {
+  await env.clearFirestore();
+  await seed(['sessions', A], { authTime: T, updatedAt: Timestamp.now() });
+  await seed(['sessions', B], { authTime: T, updatedAt: Timestamp.now() });
+});
+
+describe('single active session', () => {
+  const session = (authTime) => ({ authTime, updatedAt: serverTimestamp() });
+
+  it('a newer sign-in can claim the account; an older one cannot take it back', async () => {
+    await assertSucceeds(setDoc(doc(as(A, T + 60), 'sessions', A), session(T + 60)));
+    await assertFails(setDoc(doc(as(A, T), 'sessions', A), session(T)));
+    // Re-claiming with the same sign-in (page reload) is fine.
+    await assertSucceeds(setDoc(doc(as(A, T + 60), 'sessions', A), session(T + 60)));
+  });
+  it('rejects every data request from a superseded sign-in, even with a valid token', async () => {
+    await seed(['conversations', 'main', 'messages', 'm1'], { senderId: A, text: 'x', createdAt: Timestamp.now(), deleted: false });
+    await seed(['sessions', A], { authTime: T + 60, updatedAt: Timestamp.now() });
+    const old = as(A, T);
+    await assertFails(getDoc(msgRef(old)));
+    await assertFails(setDoc(msgRef(old, 'm2'), validMessage(A)));
+    await assertFails(getDoc(doc(old, 'users', B)));
+    await assertFails(setDoc(doc(old, 'calls', 'c1'), ringingCall(A, B)));
+    // ...but it may still read its own session doc to find out why.
+    await assertSucceeds(getDoc(doc(old, 'sessions', A)));
+    await assertSucceeds(getDoc(msgRef(as(A, T + 60))));
+  });
+  it('denies data access before any session was claimed', async () => {
+    await env.withSecurityRulesDisabled(async (ctx) => deleteDoc(doc(ctx.firestore(), 'sessions', A)));
+    await assertFails(getDoc(msgRef(as(A))));
+  });
+  it('cannot claim with a forged auth_time or for someone else', async () => {
+    await assertFails(setDoc(doc(as(A, T), 'sessions', A), session(T + 999)));
+    await assertFails(setDoc(doc(as(A, T + 60), 'sessions', B), session(T + 60)));
+    await assertFails(getDoc(doc(as(A), 'sessions', B)));
+    await assertFails(setDoc(doc(as(MALLORY, T + 60), 'sessions', MALLORY), session(T + 60)));
+    await assertFails(deleteDoc(doc(as(A), 'sessions', A)));
+  });
+});
 
 describe('authentication & allowlist', () => {
   it('denies unauthenticated reads and writes', async () => {
@@ -112,6 +154,53 @@ describe('users', () => {
     await seed(['users', A], { ...validUser(A), lastActive: Timestamp.now() });
     await assertFails(deleteDoc(doc(as(A), 'users', A)));
   });
+  it('accepts clear/wipe markers at server time but not in the future', async () => {
+    await seed(['users', A], { ...validUser(A), lastActive: Timestamp.now() });
+    await assertSucceeds(updateDoc(doc(as(A), 'users', A), { clearedAt: serverTimestamp(), callsClearedAt: serverTimestamp() }));
+    await assertSucceeds(updateDoc(doc(as(A), 'users', A), { wipedAt: serverTimestamp() }));
+    await assertFails(updateDoc(doc(as(A), 'users', A), { clearedAt: Timestamp.fromMillis(Date.now() + 86400_000) }));
+    await assertFails(updateDoc(doc(as(B), 'users', A), { clearedAt: serverTimestamp() }));
+  });
+});
+
+describe('delete for me (hiddenMessages)', () => {
+  const hidden = (db, owner, id = 'm1') => doc(db, 'users', owner, 'hiddenMessages', id);
+
+  it('owner can hide, list and un-hide; the other member cannot see or touch it', async () => {
+    await assertSucceeds(setDoc(hidden(as(A), A), { createdAt: serverTimestamp() }));
+    await assertSucceeds(getDocs(collection(as(A), 'users', A, 'hiddenMessages')));
+    await assertFails(getDocs(collection(as(B), 'users', A, 'hiddenMessages')));
+    await assertFails(setDoc(hidden(as(B), A, 'm2'), { createdAt: serverTimestamp() }));
+    await assertFails(deleteDoc(hidden(as(B), A)));
+    await assertSucceeds(deleteDoc(hidden(as(A), A)));
+  });
+  it('validates the marker', async () => {
+    await assertFails(setDoc(hidden(as(A), A, 'x1'), { createdAt: serverTimestamp(), text: 'copy' }));
+    await assertFails(setDoc(hidden(as(A), A, 'x2'), { createdAt: Timestamp.fromMillis(0) }));
+  });
+});
+
+describe('push tokens', () => {
+  const ID = 'a'.repeat(64);
+  const token = (authTime = T) => ({ token: 'fcm-token', authTime, updatedAt: serverTimestamp() });
+  const ref = (db, owner = A, id = ID) => doc(db, 'users', owner, 'pushTokens', id);
+
+  it('owner registers a token bound to the current sign-in', async () => {
+    await assertSucceeds(setDoc(ref(as(A)), token()));
+    await assertSucceeds(setDoc(ref(as(A)), token()));   // refresh
+    await assertSucceeds(deleteDoc(ref(as(A))));
+  });
+  it('rejects tokens for other users, forged auth_time, bad ids and extra fields', async () => {
+    await assertFails(setDoc(ref(as(B)), token()));
+    await assertFails(setDoc(ref(as(A)), token(T + 1)));
+    await assertFails(setDoc(ref(as(A), A, 'not-a-hash'), token()));
+    await assertFails(setDoc(ref(as(A)), { ...token(), name: 'Alice' }));
+  });
+  it('the other member can never read someone else’s tokens', async () => {
+    await seed(['users', A, 'pushTokens', ID], { token: 'fcm-token', authTime: T, updatedAt: Timestamp.now() });
+    await assertFails(getDoc(ref(as(B))));
+    await assertFails(getDocs(collection(as(B), 'users', A, 'pushTokens')));
+  });
 });
 
 describe('messages', () => {
@@ -151,10 +240,25 @@ describe('messages', () => {
     await assertSucceeds(updateDoc(msgRef(as(A)), { text: '', deleted: true, deletedAt: serverTimestamp() }));
     await assertFails(updateDoc(msgRef(as(A)), { text: '', deleted: false, deletedAt: serverTimestamp() }));
   });
-  it('never allows hard deletes', async () => {
+  it('either member may permanently erase messages ("delete conversation for everyone"); outsiders may not', async () => {
     await seed(['conversations', 'main', 'messages', 'm1'], { senderId: A, text: 'x', createdAt: Timestamp.now(), deleted: false });
-    await assertFails(deleteDoc(msgRef(as(A))));
-    await assertFails(deleteDoc(msgRef(as(B))));
+    await assertFails(deleteDoc(msgRef(as(MALLORY))));
+    await assertFails(deleteDoc(msgRef(anon())));
+    await assertFails(deleteDoc(msgRef(as(B, T - 60))));   // superseded sign-in
+    await assertSucceeds(deleteDoc(msgRef(as(B))));
+  });
+  it('allows erasing a conversation in batches', async () => {
+    for (let i = 0; i < 30; i++) {
+      await seed(['conversations', 'main', 'messages', `b${i}`], { senderId: i % 2 ? A : B, text: 'x', createdAt: Timestamp.now(), deleted: false });
+    }
+    const db = as(A);
+    const batch = writeBatch(db);
+    for (let i = 0; i < 30; i++) batch.delete(msgRef(db, `b${i}`));
+    await assertSucceeds(batch.commit());
+  });
+  it('supports the "deleted for me" query (createdAt after clearedAt)', async () => {
+    await assertSucceeds(getDocs(query(collection(as(A), 'conversations', 'main', 'messages'),
+      where('createdAt', '>', Timestamp.fromMillis(0)), orderBy('createdAt', 'desc'), limit(30))));
   });
 });
 
@@ -221,11 +325,44 @@ describe('calls', () => {
       await assertFails(updateDoc(callRef(as(A)), { status: 'ended', endedBy: A, endedAt: serverTimestamp(), updatedAt: serverTimestamp() }));
     }
   });
-  it('outsiders cannot read or touch calls; nobody can delete them', async () => {
+  it('outsiders cannot read or touch calls; ringing/active calls cannot be deleted', async () => {
     await seedCall('ringing');
     await assertFails(getDoc(callRef(as(MALLORY))));
     await assertFails(updateDoc(callRef(as(MALLORY)), { status: 'cancelled', endedAt: serverTimestamp(), updatedAt: serverTimestamp() }));
     await assertFails(deleteDoc(callRef(as(A))));
+    await seedCall('accepted', { answer: ANSWER, acceptedAt: Timestamp.now() });
+    await assertFails(deleteDoc(callRef(as(B))));
+  });
+  it('participants may delete finished calls ("clear call history for everyone")', async () => {
+    await seedCall('ended', { endedAt: Timestamp.now() });
+    await assertFails(deleteDoc(callRef(as(MALLORY))));
+    await assertSucceeds(deleteDoc(callRef(as(B))));
+    // An "accepted" call abandoned for more than a day counts as finished.
+    await seedCall('accepted', { answer: ANSWER, updatedAt: Timestamp.fromMillis(Date.now() - 2 * 86400_000) });
+    await assertSucceeds(deleteDoc(callRef(as(A))));
+  });
+  it('supports the call-history query after callsClearedAt', async () => {
+    await assertSucceeds(getDocs(query(collection(as(A), 'calls'), where('participants', 'array-contains', A),
+      where('createdAt', '>', Timestamp.fromMillis(0)), orderBy('createdAt', 'desc'), limit(15))));
+  });
+  it('ICE restart: caller sends numbered offers, callee answers the current one', async () => {
+    await seedCall('accepted', { answer: ANSWER, acceptedAt: Timestamp.now() });
+    const restart = (n) => ({ restartN: n, restartOffer: OFFER, updatedAt: serverTimestamp() });
+    const reply = (n) => ({ restartAnswerN: n, restartAnswer: ANSWER, updatedAt: serverTimestamp() });
+    await assertFails(updateDoc(callRef(as(B)), restart(1)));             // callee cannot offer
+    await assertFails(updateDoc(callRef(as(A)), restart(2)));             // must be the next number
+    await assertSucceeds(updateDoc(callRef(as(A)), restart(1)));
+    await assertFails(updateDoc(callRef(as(A)), reply(1)));               // caller cannot answer
+    await assertFails(updateDoc(callRef(as(B)), reply(2)));               // must answer the current offer
+    await assertFails(updateDoc(callRef(as(B)), { ...reply(1), restartAnswer: OFFER }));
+    await assertSucceeds(updateDoc(callRef(as(B)), reply(1)));
+    await assertFails(updateDoc(callRef(as(A)), { ...restart(2), status: 'ringing' }));
+  });
+  it('ICE restart is impossible outside an accepted call', async () => {
+    await seedCall('ringing');
+    await assertFails(updateDoc(callRef(as(A)), { restartN: 1, restartOffer: OFFER, updatedAt: serverTimestamp() }));
+    await seedCall('ended', { endedAt: Timestamp.now() });
+    await assertFails(updateDoc(callRef(as(A)), { restartN: 1, restartOffer: OFFER, updatedAt: serverTimestamp() }));
   });
 });
 

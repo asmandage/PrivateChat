@@ -172,8 +172,17 @@ export async function updateDisplayName(name) {
   await updateDoc(userRef(myUid), { displayName: name });
 }
 
+/**
+ * Sets history markers on my profile to the server time: clearedAt / callsClearedAt
+ * ("deleted for me" up to now) or wipedAt (I erased the conversation for everyone).
+ */
+export async function stampUserFields(fields) {
+  await updateDoc(userRef(myUid), Object.fromEntries(fields.map((f) => [f, serverTimestamp()])));
+}
+
 export function watchUser(uid, callback, onError) {
-  return onSnapshot(userRef(uid), (snap) => callback(snap.exists() ? snap.data() : null), onError);
+  // 'estimate': a marker I just set is visible immediately instead of as null.
+  return onSnapshot(userRef(uid), (snap) => callback(snap.exists() ? snap.data({ serverTimestamps: 'estimate' }) : null), onError);
 }
 
 /** Derives a human status from a user document. */

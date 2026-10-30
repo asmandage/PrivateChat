@@ -1,0 +1,11 @@
+{
+  "name": "privatechat-functions",
+  "private": true,
+  "description": "Cloud Functions that send coded (content-free) push notifications. Requires the Blaze plan.",
+  "main": "index.js",
+  "engines": { "node": "22" },
+  "dependencies": {
+    "firebase-admin": "^12.7.0",
+    "firebase-functions": "^6.1.1"
+  }
+}

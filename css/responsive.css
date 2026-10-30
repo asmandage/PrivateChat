@@ -52,3 +52,7 @@
   .msg-delete { opacity: 0; }
   .msg.show-actions .msg-delete { opacity: 1; }
 }
+
+@media (max-width: 820px) {
+  .msg.in .msg-delete { left: auto; right: -36px; }
+}

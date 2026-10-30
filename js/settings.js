@@ -3,6 +3,9 @@
  * Nothing secret is stored here — Firebase Auth manages its own session storage.
  */
 import { $, openModal, bindModalDismiss, toast } from './ui.js';
+import {
+  getNotifyConfig, setNotifyConfig, NOTIFY_KINDS, CODE_PATTERN,
+} from './notify-config.js';
 
 const STORAGE_KEY = 'privatechat.prefs';
 
@@ -10,8 +13,7 @@ const DEFAULTS = {
   theme: 'system',          // 'system' | 'light' | 'dark'
   messageSound: true,
   ringtone: true,
-  browserNotify: false,
-  notifyPreview: false,     // show message text inside OS notifications
+  browserNotify: false,     // private (coded) notifications
   micId: '',
   cameraId: '',
   speakerId: '',
@@ -133,13 +135,13 @@ async function detectDevices() {
 function updateNotifyNote() {
   const note = $('notify-permission-note');
   if (!('Notification' in window)) {
-    note.textContent = 'This browser does not support notifications (on iOS, add the site to your Home Screen first).';
+    note.textContent = 'This browser does not support notifications (on iPhone/iPad, add the app to your Home Screen first, iOS 16.4+).';
     $('pref-browser-notify').disabled = true;
     return;
   }
   const map = {
     granted: 'Notification permission: granted.',
-    denied: 'Notifications are blocked for this site. Re-enable them in your browser’s site settings.',
+    denied: 'Notifications are blocked for this site. Turn the switch on to see how to re-enable them.',
     default: 'You will be asked for permission when you turn this on.',
   };
   note.textContent = map[Notification.permission] || '';
@@ -150,17 +152,48 @@ function syncSettingsForm() {
   $('pref-message-sound').checked = prefs.messageSound;
   $('pref-ringtone').checked = prefs.ringtone;
   $('pref-browser-notify').checked = prefs.browserNotify && 'Notification' in window && Notification.permission === 'granted';
-  $('pref-notify-preview').checked = prefs.notifyPreview;
   updateNotifyNote();
+}
+
+/* ---------- Coded notification texts ---------- */
+async function fillCodeForm() {
+  const cfg = await getNotifyConfig();
+  $('code-title').value = cfg.title;
+  $('code-body').value = cfg.body;
+  for (const k of NOTIFY_KINDS) $(`code-${k}`).value = cfg.codes[k];
+  $('code-silent').checked = cfg.silent;
+}
+
+async function saveCodeForm(e) {
+  e.preventDefault();
+  const codes = {};
+  for (const k of NOTIFY_KINDS) codes[k] = $(`code-${k}`).value.trim();
+  const title = $('code-title').value.trim();
+  const body = $('code-body').value.trim();
+  if (!title || !body) { toast('Title and text cannot be empty.', { type: 'warning' }); return; }
+  if (!Object.values(codes).every((c) => CODE_PATTERN.test(c))) {
+    toast('Codes may only use letters, digits and “-” (1–12 characters).', { type: 'warning' });
+    return;
+  }
+  try {
+    await setNotifyConfig({ title, body, codes, silent: $('code-silent').checked });
+    toast('Notification codes saved on this device.', { type: 'success' });
+  } catch {
+    toast('Could not save the codes in this browser (storage blocked?).', { type: 'error' });
+  }
 }
 
 let settingsBound = false;
 
 /**
- * Wires the settings modal once. Profile saving and logout are passed in by app.js
- * so this module stays free of Firebase dependencies.
+ * Wires the settings modal once. Firebase-dependent actions (profile, logout,
+ * notification/push setup, history deletion) are passed in by app.js so this
+ * module stays free of Firebase dependencies.
  */
-export function initSettings({ onSaveDisplayName, onLogout, getDisplayName, getEmail, turnStatus, version }) {
+export function initSettings({
+  onSaveDisplayName, onLogout, getDisplayName, getEmail, turnStatus, version,
+  onNotificationsToggle, onTestNotification, onClearHistory, pushStatus,
+}) {
   applyTheme();
   if (settingsBound) return;
   settingsBound = true;
@@ -169,9 +202,11 @@ export function initSettings({ onSaveDisplayName, onLogout, getDisplayName, getE
 
   const open = () => {
     syncSettingsForm();
+    fillCodeForm();
     $('display-name-input').value = getDisplayName() || '';
     $('me-email').textContent = getEmail() ? `Signed in as ${getEmail()}` : '';
     $('turn-status').textContent = turnStatus();
+    $('push-note').textContent = pushStatus();
     $('app-version').textContent = `v${version}`;
     refreshDeviceLists();
     openModal('settings-modal');
@@ -185,20 +220,26 @@ export function initSettings({ onSaveDisplayName, onLogout, getDisplayName, getE
   });
   $('pref-message-sound').addEventListener('change', (e) => setPref('messageSound', e.target.checked));
   $('pref-ringtone').addEventListener('change', (e) => setPref('ringtone', e.target.checked));
-  $('pref-notify-preview').addEventListener('change', (e) => setPref('notifyPreview', e.target.checked));
   $('pref-browser-notify').addEventListener('change', async (e) => {
-    if (!e.target.checked) { setPref('browserNotify', false); return; }
-    if (!('Notification' in window)) { e.target.checked = false; return; }
-    let permission = Notification.permission;
-    if (permission === 'default') {
-      try { permission = await Notification.requestPermission(); } catch { permission = 'denied'; }
+    const toggle = e.target;
+    toggle.disabled = true;
+    try {
+      // app.js explains + requests permission (never re-prompting after a denial) and
+      // registers or removes this device for background push.
+      const enabled = await onNotificationsToggle(toggle.checked);
+      toggle.checked = enabled;
+      setPref('browserNotify', enabled);
+    } finally {
+      toggle.disabled = false;
+      updateNotifyNote();
+      $('push-note').textContent = pushStatus();
     }
-    const granted = permission === 'granted';
-    e.target.checked = granted;
-    setPref('browserNotify', granted);
-    if (!granted) toast('Notification permission was not granted.', { type: 'warning' });
-    updateNotifyNote();
   });
+  $('notify-code-form').addEventListener('submit', saveCodeForm);
+  $('code-test').addEventListener('click', async () => {
+    if (!(await onTestNotification())) toast('Turn on private notifications first.', { type: 'warning' });
+  });
+  $('clear-history-btn').addEventListener('click', onClearHistory);
 
   $('pref-mic').addEventListener('change', (e) => setPref('micId', e.target.value));
   $('pref-camera').addEventListener('change', (e) => setPref('cameraId', e.target.value));
