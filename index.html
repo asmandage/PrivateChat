@@ -1,0 +1,364 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="description" content="A private chat, audio and video calling space for two." />
+  <meta name="theme-color" content="#5b5ef0" />
+  <meta name="referrer" content="strict-origin-when-cross-origin" />
+  <meta http-equiv="Content-Security-Policy"
+    content="default-src 'self';
+             script-src 'self' https://www.gstatic.com https://www.google.com https://www.recaptcha.net;
+             style-src 'self' 'unsafe-inline' https://fonts.googleapis.com;
+             font-src 'self' https://fonts.gstatic.com;
+             img-src 'self' data: blob:;
+             media-src 'self' blob: mediastream:;
+             connect-src 'self' https: wss:;
+             frame-src https://www.google.com https://www.recaptcha.net https://*.firebaseapp.com;
+             object-src 'none';
+             base-uri 'self';
+             form-action 'self'" />
+  <title>PrivateChat</title>
+  <link rel="icon" href="assets/icons/favicon.svg" type="image/svg+xml" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" />
+  <link rel="stylesheet" href="css/style.css" />
+  <link rel="stylesheet" href="css/chat.css" />
+  <link rel="stylesheet" href="css/calls.css" />
+  <link rel="stylesheet" href="css/responsive.css" />
+  <!-- Applies the saved theme before first paint (no inline script so the CSP stays strict). -->
+  <script src="js/theme-boot.js"></script>
+</head>
+<body>
+  <!-- ============ Inline SVG icon sprite (original line icons) ============ -->
+  <svg xmlns="http://www.w3.org/2000/svg" style="display:none" aria-hidden="true">
+    <symbol id="i-logo" viewBox="0 0 32 32"><path fill="currentColor" d="M16 3C8.8 3 3 8.3 3 14.8c0 3.6 1.8 6.8 4.6 9L6.5 29l5.3-2.9c1.3.4 2.7.6 4.2.6 7.2 0 13-5.3 13-11.9S23.2 3 16 3Z" opacity=".25"/><path fill="currentColor" d="M11 12.5a2 2 0 1 1 0 4 2 2 0 0 1 0-4Zm10 0a2 2 0 1 1 0 4 2 2 0 0 1 0-4Zm-7.6 7.3c1.5 1.1 3.7 1.1 5.2 0a1 1 0 1 1 1.2 1.6 6.4 6.4 0 0 1-7.6 0 1 1 0 0 1 1.2-1.6Z"/></symbol>
+    <symbol id="i-phone" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M22 16.9v3a2 2 0 0 1-2.2 2 19.8 19.8 0 0 1-8.6-3.1 19.5 19.5 0 0 1-6-6A19.8 19.8 0 0 1 2.1 4.2 2 2 0 0 1 4.1 2h3a2 2 0 0 1 2 1.7c.1 1 .4 1.9.7 2.8a2 2 0 0 1-.5 2.1L8 9.9a16 16 0 0 0 6 6l1.3-1.3a2 2 0 0 1 2.1-.4c.9.3 1.8.6 2.8.7a2 2 0 0 1 1.7 2Z"/></symbol>
+    <symbol id="i-phone-off" viewBox="0 0 24 24"><path fill="currentColor" d="M12 9c-1.6 0-3.1.3-4.6.7v3.1c0 .4-.2.7-.6.9-1 .5-1.9 1.1-2.6 1.8a1 1 0 0 1-1.4 0L.3 13a1 1 0 0 1 0-1.4C3.3 8.7 7.5 7 12 7s8.7 1.7 11.7 4.6a1 1 0 0 1 0 1.4l-2.5 2.5a1 1 0 0 1-1.4 0c-.8-.7-1.7-1.3-2.6-1.8a1 1 0 0 1-.6-.9V9.7C15.1 9.2 13.6 9 12 9Z"/></symbol>
+    <symbol id="i-video" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m22 8-6 4 6 4V8Z"/><rect x="2" y="6" width="14" height="12" rx="2"/></g></symbol>
+    <symbol id="i-video-off" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.7 6H14a2 2 0 0 1 2 2v3.3l1 1L22 8v8M16 16a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h2"/><path d="m2 2 20 20"/></g></symbol>
+    <symbol id="i-mic" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M19 10v1a7 7 0 0 1-14 0v-1M12 18v4M8 22h8"/></g></symbol>
+    <symbol id="i-mic-off" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m2 2 20 20M9 9v2a3 3 0 0 0 5.1 2.1M15 9.3V5a3 3 0 0 0-5.9-.7"/><path d="M17 16.9A7 7 0 0 1 5 11v-1m14 0v1c0 .8-.1 1.5-.4 2.2M12 18v4M8 22h8"/></g></symbol>
+    <symbol id="i-switch-camera" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 7h-3l-2-3H9L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2Z"/><path d="M15.5 13.5a3.5 3.5 0 0 1-6.3 1.6M8.5 12.5a3.5 3.5 0 0 1 6.3-1.6"/><path d="M15 9.5v1.4h-1.4M9 16.5v-1.4h1.4"/></g></symbol>
+    <symbol id="i-send" viewBox="0 0 24 24"><path fill="currentColor" d="M3.4 20.4 21 12 3.4 3.6a.6.6 0 0 0-.8.8L5.5 11h7a1 1 0 1 1 0 2h-7l-2.9 6.6a.6.6 0 0 0 .8.8Z"/></symbol>
+    <symbol id="i-settings" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1Z"/></g></symbol>
+    <symbol id="i-sun" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></g></symbol>
+    <symbol id="i-moon" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8Z"/></symbol>
+    <symbol id="i-logout" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"/></g></symbol>
+    <symbol id="i-back" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M15 18 9 12l6-6"/></symbol>
+    <symbol id="i-close" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" d="M18 6 6 18M6 6l12 12"/></symbol>
+    <symbol id="i-check" viewBox="0 0 16 16"><path fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" d="m3 8.5 3 3 7-7"/></symbol>
+    <symbol id="i-check-double" viewBox="0 0 20 16"><path fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" d="m1.5 8.5 3 3 7-7M8.5 11.5l7-7M7 10l1.5 1.5"/></symbol>
+    <symbol id="i-clock" viewBox="0 0 16 16"><g fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><circle cx="8" cy="8" r="6"/><path d="M8 4.8V8l2 1.4"/></g></symbol>
+    <symbol id="i-alert" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 8v4M12 16h.01"/></g></symbol>
+    <symbol id="i-trash" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m3 0v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/></g></symbol>
+    <symbol id="i-arrow-down" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="m6 9 6 6 6-6"/></symbol>
+    <symbol id="i-eye" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/></g></symbol>
+    <symbol id="i-lock" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></g></symbol>
+    <symbol id="i-call-in" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M16 2v6h6M22 2l-6 6"/></symbol>
+    <symbol id="i-call-out" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M22 8V2h-6M16 8l6-6"/></symbol>
+    <symbol id="i-wifi-off" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m2 2 20 20M8.5 16.4a5 5 0 0 1 7 0M2 8.8a15 15 0 0 1 4.2-2.6M10.7 5a15 15 0 0 1 11.3 3.8M5 12.9a10 10 0 0 1 5.2-2.8M17.8 12.6a10 10 0 0 1 1.2.3M12 20h.01"/></g></symbol>
+    <symbol id="i-volume" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5 6 9H2v6h4l5 4V5Z"/><path d="M15.5 8.5a5 5 0 0 1 0 7M19 5a10 10 0 0 1 0 14"/></g></symbol>
+  </svg>
+
+  <!-- ============ Boot / auth verification screen ============ -->
+  <div id="boot-screen" class="boot-screen" role="status" aria-live="polite">
+    <div class="boot-logo"><svg><use href="#i-logo"/></svg></div>
+    <div class="spinner" aria-hidden="true"></div>
+    <p id="boot-message">Verifying your session…</p>
+  </div>
+
+  <!-- ============ Login screen ============ -->
+  <section id="login-screen" class="login-screen" hidden aria-labelledby="login-title">
+    <div class="login-art" aria-hidden="true">
+      <div class="blob blob-a"></div><div class="blob blob-b"></div><div class="blob blob-c"></div>
+    </div>
+    <div class="login-card">
+      <div class="login-brand">
+        <div class="brand-mark"><svg><use href="#i-logo"/></svg></div>
+        <div>
+          <h1 id="login-title">PrivateChat</h1>
+          <p class="muted">A private space for exactly two people.</p>
+        </div>
+      </div>
+
+      <form id="login-form" class="login-form" novalidate>
+        <label class="field">
+          <span>Email</span>
+          <input id="login-email" type="email" name="email" autocomplete="username" inputmode="email" required placeholder="you@example.com" />
+        </label>
+        <label class="field">
+          <span>Password</span>
+          <div class="input-with-action">
+            <input id="login-password" type="password" name="password" autocomplete="current-password" required minlength="6" placeholder="••••••••" />
+            <button type="button" id="toggle-password" class="icon-btn small" aria-label="Show password" title="Show password">
+              <svg><use href="#i-eye"/></svg>
+            </button>
+          </div>
+        </label>
+        <p id="login-error" class="form-error" role="alert" hidden></p>
+        <button id="login-submit" type="submit" class="btn btn-primary btn-block">
+          <span class="btn-label">Sign in</span>
+          <span class="btn-spinner" aria-hidden="true"></span>
+        </button>
+        <button id="forgot-password" type="button" class="link-btn">Forgot password?</button>
+      </form>
+
+      <p class="login-footnote"><svg><use href="#i-lock"/></svg> No sign-ups. Access is limited to two authorized accounts.</p>
+    </div>
+  </section>
+
+  <!-- ============ Main application ============ -->
+  <div id="app-screen" class="app" hidden>
+    <!-- Sidebar -->
+    <aside class="sidebar" aria-label="Conversations and calls">
+      <header class="sidebar-header">
+        <div class="me">
+          <div id="me-avatar" class="avatar" aria-hidden="true"></div>
+          <div class="me-text">
+            <strong id="me-name">—</strong>
+            <span class="muted small">You</span>
+          </div>
+        </div>
+        <div class="header-actions">
+          <button id="theme-toggle" class="icon-btn" aria-label="Toggle dark mode" title="Toggle theme">
+            <svg class="icon-sun"><use href="#i-sun"/></svg><svg class="icon-moon"><use href="#i-moon"/></svg>
+          </button>
+          <button id="open-settings" class="icon-btn" aria-label="Settings" title="Settings"><svg><use href="#i-settings"/></svg></button>
+        </div>
+      </header>
+
+      <div id="network-banner" class="network-banner" hidden>
+        <svg><use href="#i-wifi-off"/></svg><span>You are offline. Messages will send when you reconnect.</span>
+      </div>
+
+      <div class="sidebar-section-title">Chat</div>
+      <button id="contact-item" class="contact-item" type="button">
+        <div class="avatar-wrap">
+          <div id="contact-avatar" class="avatar" aria-hidden="true"></div>
+          <span id="contact-status-dot" class="status-dot" aria-hidden="true"></span>
+        </div>
+        <div class="contact-text">
+          <div class="contact-row">
+            <strong id="contact-name">Loading…</strong>
+            <span id="contact-time" class="muted small"></span>
+          </div>
+          <div class="contact-row">
+            <span id="contact-preview" class="contact-preview muted"></span>
+            <span id="unread-badge" class="badge" hidden>0</span>
+          </div>
+        </div>
+      </button>
+
+      <div class="sidebar-section-title">Recent calls</div>
+      <ul id="call-history" class="call-history" aria-live="polite"></ul>
+      <p id="call-history-empty" class="sidebar-empty muted small" hidden>No calls yet.</p>
+
+      <footer class="sidebar-footer muted small">
+        <svg><use href="#i-lock"/></svg> Access restricted to two accounts
+      </footer>
+    </aside>
+
+    <!-- Chat panel -->
+    <main class="chat" aria-label="Conversation">
+      <header class="chat-header">
+        <button id="back-to-sidebar" class="icon-btn mobile-only" aria-label="Back"><svg><use href="#i-back"/></svg></button>
+        <div class="avatar-wrap">
+          <div id="peer-avatar" class="avatar" aria-hidden="true"></div>
+          <span id="peer-status-dot" class="status-dot" aria-hidden="true"></span>
+        </div>
+        <div class="peer-text">
+          <strong id="peer-name">Loading…</strong>
+          <span id="peer-status" class="peer-status muted small" title="">connecting…</span>
+        </div>
+        <div class="header-actions">
+          <button id="audio-call-btn" class="icon-btn" aria-label="Start audio call" title="Audio call"><svg><use href="#i-phone"/></svg></button>
+          <button id="video-call-btn" class="icon-btn" aria-label="Start video call" title="Video call"><svg><use href="#i-video"/></svg></button>
+          <button id="open-settings-2" class="icon-btn mobile-only" aria-label="Settings" title="Settings"><svg><use href="#i-settings"/></svg></button>
+        </div>
+      </header>
+
+      <div id="messages-scroller" class="messages-scroller" tabindex="0" aria-label="Messages">
+        <div id="older-loader" class="older-loader" hidden>
+          <button id="load-older" class="chip" type="button">Load earlier messages</button>
+        </div>
+        <div id="messages-skeleton" class="messages-skeleton" aria-hidden="true">
+          <div class="sk sk-in"></div><div class="sk sk-out"></div><div class="sk sk-in short"></div><div class="sk sk-out long"></div><div class="sk sk-in"></div>
+        </div>
+        <div id="messages-empty" class="messages-empty" hidden>
+          <div class="empty-illustration"><svg><use href="#i-logo"/></svg></div>
+          <h2>Say hello 👋</h2>
+          <p class="muted">This conversation is private between the two of you. Send the first message.</p>
+        </div>
+        <div id="messages-error" class="messages-error" hidden role="alert">
+          <svg><use href="#i-alert"/></svg>
+          <p id="messages-error-text">Could not load messages.</p>
+          <button id="messages-retry" class="btn btn-secondary" type="button">Retry</button>
+        </div>
+        <ol id="message-list" class="message-list" aria-live="polite" aria-relevant="additions"></ol>
+        <div id="typing-indicator" class="typing-indicator" hidden aria-label="Typing">
+          <span></span><span></span><span></span>
+        </div>
+      </div>
+
+      <button id="scroll-bottom" class="scroll-bottom" type="button" hidden aria-label="Scroll to latest messages">
+        <svg><use href="#i-arrow-down"/></svg><span id="scroll-bottom-count" class="badge" hidden></span>
+      </button>
+
+      <form id="composer" class="composer" autocomplete="off">
+        <div class="composer-field">
+          <textarea id="message-input" rows="1" maxlength="4000" placeholder="Type a message" aria-label="Message"></textarea>
+          <span id="char-counter" class="char-counter" hidden></span>
+        </div>
+        <button id="send-btn" class="send-btn" type="submit" aria-label="Send message" disabled>
+          <svg><use href="#i-send"/></svg>
+        </button>
+      </form>
+    </main>
+  </div>
+
+  <!-- ============ Incoming call ============ -->
+  <div id="incoming-call" class="incoming-call" hidden role="alertdialog" aria-modal="true" aria-labelledby="incoming-name" aria-describedby="incoming-type">
+    <div class="incoming-card">
+      <div class="pulse-ring"><div id="incoming-avatar" class="avatar xl" aria-hidden="true"></div></div>
+      <h2 id="incoming-name">—</h2>
+      <p id="incoming-type" class="muted">Incoming call</p>
+      <div class="incoming-actions">
+        <div class="call-action">
+          <button id="reject-call" class="round-btn danger" aria-label="Decline call"><svg><use href="#i-phone-off"/></svg></button>
+          <span>Decline</span>
+        </div>
+        <div class="call-action">
+          <button id="accept-call" class="round-btn success" aria-label="Accept call"><svg id="accept-icon"><use href="#i-phone"/></svg></button>
+          <span>Accept</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ Active call screen ============ -->
+  <div id="call-screen" class="call-screen" hidden data-call-type="audio" role="dialog" aria-modal="true" aria-labelledby="call-peer-name">
+    <video id="remote-video" class="remote-video" autoplay playsinline></video>
+    <audio id="remote-audio" autoplay></audio>
+
+    <div class="call-backdrop" aria-hidden="true"></div>
+
+    <div class="call-center">
+      <div class="pulse-ring" id="call-avatar-ring"><div id="call-avatar" class="avatar xl" aria-hidden="true"></div></div>
+      <h2 id="call-peer-name">—</h2>
+      <p id="call-status" class="call-status">Starting…</p>
+      <p id="call-timer" class="call-timer" hidden>00:00</p>
+    </div>
+
+    <div class="call-topbar">
+      <span id="call-type-label" class="call-pill"><svg><use href="#i-lock"/></svg> Audio call</span>
+      <span id="call-timer-small" class="call-pill" hidden>00:00</span>
+      <span id="call-quality" class="call-pill warn" hidden>Reconnecting…</span>
+    </div>
+
+    <div id="local-preview" class="local-preview" hidden>
+      <video id="local-video" autoplay playsinline muted></video>
+      <div id="local-camera-off" class="local-camera-off" hidden><svg><use href="#i-video-off"/></svg></div>
+    </div>
+
+    <button id="enable-audio" class="btn btn-primary enable-audio" type="button" hidden>
+      <svg><use href="#i-volume"/></svg> Tap to enable sound
+    </button>
+
+    <div class="call-controls" role="toolbar" aria-label="Call controls">
+      <button id="toggle-mic" class="round-btn glass" aria-pressed="false" aria-label="Mute microphone" title="Mute"><svg class="on"><use href="#i-mic"/></svg><svg class="off"><use href="#i-mic-off"/></svg></button>
+      <button id="toggle-camera" class="round-btn glass video-only" aria-pressed="false" aria-label="Turn camera off" title="Camera"><svg class="on"><use href="#i-video"/></svg><svg class="off"><use href="#i-video-off"/></svg></button>
+      <button id="switch-camera" class="round-btn glass video-only" aria-label="Switch camera" title="Switch camera" hidden><svg><use href="#i-switch-camera"/></svg></button>
+      <button id="end-call" class="round-btn danger" aria-label="End call" title="End call"><svg><use href="#i-phone-off"/></svg></button>
+    </div>
+  </div>
+
+  <!-- ============ Settings ============ -->
+  <div id="settings-modal" class="modal" hidden role="dialog" aria-modal="true" aria-labelledby="settings-title">
+    <div class="modal-backdrop" data-close></div>
+    <div class="modal-panel">
+      <header class="modal-header">
+        <h2 id="settings-title">Settings</h2>
+        <button class="icon-btn" data-close aria-label="Close settings"><svg><use href="#i-close"/></svg></button>
+      </header>
+      <div class="modal-body">
+        <section class="settings-group">
+          <h3>Profile</h3>
+          <form id="profile-form" class="inline-form">
+            <label class="field grow">
+              <span>Display name</span>
+              <input id="display-name-input" type="text" maxlength="40" required />
+            </label>
+            <button class="btn btn-secondary" type="submit">Save</button>
+          </form>
+          <p class="muted small" id="me-email"></p>
+        </section>
+
+        <section class="settings-group">
+          <h3>Appearance</h3>
+          <div class="segmented" role="radiogroup" aria-label="Theme">
+            <label><input type="radio" name="theme" value="system" /><span>System</span></label>
+            <label><input type="radio" name="theme" value="light" /><span>Light</span></label>
+            <label><input type="radio" name="theme" value="dark" /><span>Dark</span></label>
+          </div>
+        </section>
+
+        <section class="settings-group">
+          <h3>Notifications</h3>
+          <label class="switch-row"><span>Message sounds</span><input type="checkbox" id="pref-message-sound" class="switch" /></label>
+          <label class="switch-row"><span>Ringtone for incoming calls</span><input type="checkbox" id="pref-ringtone" class="switch" /></label>
+          <label class="switch-row"><span>Browser notifications</span><input type="checkbox" id="pref-browser-notify" class="switch" /></label>
+          <label class="switch-row"><span>Show message text in notifications</span><input type="checkbox" id="pref-notify-preview" class="switch" /></label>
+          <p id="notify-permission-note" class="muted small"></p>
+          <p class="muted small">Notifications only arrive while this page is open (in a tab, even in the background). Closed or suspended browsers cannot receive calls — see README.</p>
+        </section>
+
+        <section class="settings-group">
+          <h3>Audio &amp; video devices</h3>
+          <label class="field"><span>Microphone</span><select id="pref-mic"></select></label>
+          <label class="field"><span>Camera</span><select id="pref-camera"></select></label>
+          <label class="field" id="speaker-field"><span>Speaker</span><select id="pref-speaker"></select></label>
+          <button id="refresh-devices" class="btn btn-secondary" type="button">Detect devices</button>
+          <p class="muted small" id="devices-note">Device names appear after you grant camera/microphone permission once.</p>
+        </section>
+
+        <section class="settings-group">
+          <h3>About</h3>
+          <dl class="about-list">
+            <dt>Application</dt><dd>PrivateChat <span id="app-version"></span></dd>
+            <dt>Messaging</dt><dd>Cloud Firestore (real-time)</dd>
+            <dt>Calls</dt><dd>WebRTC peer-to-peer, encrypted with DTLS-SRTP</dd>
+            <dt>Relay (TURN)</dt><dd id="turn-status">—</dd>
+          </dl>
+        </section>
+
+        <section class="settings-group">
+          <button id="logout-btn" class="btn btn-danger btn-block" type="button"><svg><use href="#i-logout"/></svg> Log out</button>
+        </section>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ Confirm dialog ============ -->
+  <div id="confirm-modal" class="modal" hidden role="alertdialog" aria-modal="true" aria-labelledby="confirm-title" aria-describedby="confirm-text">
+    <div class="modal-backdrop" data-cancel></div>
+    <div class="modal-panel small">
+      <div class="modal-body">
+        <h2 id="confirm-title">Are you sure?</h2>
+        <p id="confirm-text" class="muted"></p>
+        <div class="modal-actions">
+          <button id="confirm-cancel" class="btn btn-secondary" type="button" data-cancel>Cancel</button>
+          <button id="confirm-ok" class="btn btn-danger" type="button">Confirm</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast-region" class="toast-region" aria-live="polite" aria-atomic="false"></div>
+
+  <noscript><div class="noscript">PrivateChat requires JavaScript.</div></noscript>
+
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>

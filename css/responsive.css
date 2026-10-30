@@ -1,0 +1,54 @@
+/* =========================================================================
+   PrivateChat — responsive behaviour
+   ========================================================================= */
+
+.mobile-only { display: none; }
+
+@media (max-width: 820px) {
+  .app { grid-template-columns: 1fr; }
+  .mobile-only { display: inline-grid; }
+
+  /* Two-pane layout collapses into a sliding stack: sidebar <-> chat */
+  .sidebar, .chat { grid-area: 1 / 1; transition: transform 0.28s cubic-bezier(0.2, 0.8, 0.2, 1); }
+  .chat { transform: translateX(100%); }
+  .app.show-chat .chat { transform: none; }
+  .app.show-chat .sidebar { transform: translateX(-28%); }
+  .sidebar { border-right: none; }
+
+  .chat-header { padding-left: 4px; gap: 8px; }
+  .chat-header .avatar { width: 38px; height: 38px; font-size: 14px; }
+  .bubble { max-width: 86%; }
+  .msg-delete { left: -36px; }
+  .messages-scroller { padding-left: 10px; padding-right: 10px; }
+  .composer { padding-left: 10px; padding-right: 10px; gap: 8px; }
+  .composer textarea { font-size: 16px; } /* >=16px prevents iOS zoom on focus */
+  .field input, .field select { font-size: 16px; }
+}
+
+@media (max-width: 480px) {
+  .login-card { padding: 28px 20px 22px; border-radius: 22px; }
+  .modal { padding: 0; align-items: end; }
+  .modal-panel { max-width: none; max-height: 92dvh; border-radius: 22px 22px 0 0; padding-bottom: var(--safe-bottom); }
+  .modal-panel.small { border-radius: 22px 22px 0 0; max-width: none; }
+  .call-controls { gap: 12px; padding: 10px 14px; }
+  .round-btn { width: 56px; height: 56px; }
+  .avatar.xl { width: 92px; height: 92px; font-size: 32px; }
+  .inline-form { flex-direction: column; align-items: stretch; }
+}
+
+/* Landscape phones: keep call UI usable in short viewports */
+@media (max-height: 500px) and (orientation: landscape) {
+  .call-center { top: 10%; }
+  .call-center .avatar.xl { width: 64px; height: 64px; font-size: 24px; }
+  .call-center h2 { margin-top: 12px; font-size: 20px; }
+  .call-controls { bottom: calc(12px + var(--safe-bottom)); }
+  .local-preview { width: clamp(90px, 16vw, 160px); aspect-ratio: 4 / 3; top: calc(48px + var(--safe-top)); }
+  .incoming-card { padding: 20px; }
+  .incoming-card h2 { margin-top: 12px; }
+  .incoming-actions { margin-top: 18px; }
+}
+
+@media (hover: none) {
+  .msg-delete { opacity: 0; }
+  .msg.show-actions .msg-delete { opacity: 1; }
+}

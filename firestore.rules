@@ -1,0 +1,216 @@
+rules_version = '2';
+
+// =============================================================================
+//  PrivateChat — Firestore security rules
+//
+//  ⚠ BEFORE PUBLISHING: replace the two placeholder UIDs below with the real
+//    Firebase Authentication UIDs of your two users (same as js/firebase-config.js).
+//
+//  Model:
+//    users/{uid}                                    profile + presence + typing + read markers
+//    conversations/main/messages/{messageId}        chat messages
+//    calls/{callId}                                 call session + SDP offer/answer
+//    calls/{callId}/callerCandidates/{0..99}        caller ICE candidates
+//    calls/{callId}/calleeCandidates/{0..99}        callee ICE candidates
+//
+//  Anything not matched below is denied (Firestore is deny-by-default and this
+//  file contains no recursive wildcard allows).
+// =============================================================================
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ---- Allowlist -----------------------------------------------------------
+    function user1Uid() { return 'wxC2B1XFgtaoIFOVTUjhBOAxoKi1'; }
+    function user2Uid() { return 'Ce6xiyk5gJenhC3eRNcVnnCJr6t1'; }
+
+    // ---- Helpers -------------------------------------------------------------
+    function isMember() {
+      return request.auth != null
+        && (request.auth.uid == user1Uid() || request.auth.uid == user2Uid());
+    }
+    function me() { return request.auth.uid; }
+    function otherOf(uid) { return uid == user1Uid() ? user2Uid() : user1Uid(); }
+    function incoming() { return request.resource.data; }
+    function existing() { return resource.data; }
+    function changedKeys() { return incoming().diff(existing()).affectedKeys(); }
+
+    // Optional timestamp that may not be in the future (prevents faking "online forever"
+    // or "read" receipts for messages that do not exist yet).
+    function optPastTimestamp(d, field) {
+      return !(field in d) || (d[field] is timestamp && d[field] <= request.time);
+    }
+
+    // ---- Users: profile, presence, typing, read/delivered markers ------------
+    match /users/{userId} {
+      function validUser(d) {
+        return d.keys().hasOnly(['uid', 'displayName', 'state', 'lastActive', 'typing',
+                                 'typingAt', 'lastReadAt', 'lastDeliveredAt'])
+          && d.uid == userId
+          && d.displayName is string
+          && d.displayName.trim().size() >= 1 && d.displayName.size() <= 40
+          && d.state in ['online', 'offline']
+          && d.lastActive is timestamp && d.lastActive <= request.time
+          && d.typing is bool
+          && optPastTimestamp(d, 'typingAt')
+          && optPastTimestamp(d, 'lastReadAt')
+          && optPastTimestamp(d, 'lastDeliveredAt');
+      }
+
+      allow read: if isMember();
+      allow create: if isMember() && userId == me()
+        && incoming().keys().hasAll(['uid', 'displayName', 'state', 'lastActive', 'typing'])
+        && validUser(incoming());
+      allow update: if isMember() && userId == me() && validUser(incoming());
+      allow delete: if false;
+    }
+
+    // ---- Messages -------------------------------------------------------------
+    match /conversations/{conversationId}/messages/{messageId} {
+      allow read: if isMember() && conversationId == 'main';
+
+      // Create only (a retried send with the same id is an update and is denied →
+      // no duplicates). Sender must be the caller; server timestamp is mandatory.
+      allow create: if isMember() && conversationId == 'main'
+        && messageId.size() <= 64
+        && incoming().keys().hasOnly(['senderId', 'text', 'createdAt', 'deleted'])
+        && incoming().keys().hasAll(['senderId', 'text', 'createdAt', 'deleted'])
+        && incoming().senderId == me()
+        && incoming().text is string
+        && incoming().text.size() <= 4000
+        && incoming().text.trim().size() > 0
+        && incoming().createdAt == request.time
+        && incoming().deleted == false;
+
+      // The only permitted edit: the SENDER blanks their own message ("delete for everyone").
+      allow update: if isMember() && conversationId == 'main'
+        && existing().senderId == me()
+        && existing().deleted == false
+        && changedKeys().hasOnly(['text', 'deleted', 'deletedAt'])
+        && incoming().text == ''
+        && incoming().deleted == true
+        && incoming().deletedAt == request.time;
+
+      // Hard deletes are never allowed (keeps history consistent for both users).
+      allow delete: if false;
+    }
+
+    // ---- Calls ----------------------------------------------------------------
+    match /calls/{callId} {
+      function validSdp(s, kind) {
+        return s is map
+          && s.keys().hasOnly(['type', 'sdp'])
+          && s.type == kind
+          && s.sdp is string && s.sdp.size() > 0 && s.sdp.size() <= 100000;
+      }
+      function validReason() {
+        return !('endReason' in incoming())
+          || (incoming().endReason is string && incoming().endReason.size() <= 32);
+      }
+
+      // ringing → accepted (callee only, must attach the SDP answer)
+      function calleeAccepts() {
+        return existing().calleeId == me()
+          && existing().status == 'ringing'
+          && incoming().status == 'accepted'
+          && changedKeys().hasOnly(['status', 'answer', 'acceptedAt', 'updatedAt'])
+          && validSdp(incoming().answer, 'answer')
+          && incoming().acceptedAt == request.time;
+      }
+      // ringing → rejected | busy | missed (callee only)
+      function calleeEndsRinging() {
+        return existing().calleeId == me()
+          && existing().status == 'ringing'
+          && incoming().status in ['rejected', 'busy', 'missed']
+          && changedKeys().hasOnly(['status', 'updatedAt', 'endedAt', 'endReason'])
+          && incoming().endedAt == request.time
+          && validReason();
+      }
+      // ringing → cancelled | missed (caller only)
+      function callerEndsRinging() {
+        return existing().callerId == me()
+          && existing().status == 'ringing'
+          && incoming().status in ['cancelled', 'missed']
+          && changedKeys().hasOnly(['status', 'updatedAt', 'endedAt', 'endReason'])
+          && incoming().endedAt == request.time
+          && validReason();
+      }
+      // accepted → ended | failed (either participant, recorded as endedBy)
+      function participantEndsActive() {
+        return existing().status == 'accepted'
+          && incoming().status in ['ended', 'failed']
+          && changedKeys().hasOnly(['status', 'updatedAt', 'endedAt', 'endedBy', 'endReason'])
+          && incoming().endedBy == me()
+          && incoming().endedAt == request.time
+          && validReason();
+      }
+
+      // Every call is between the two members, so both may read every call doc.
+      allow read: if isMember();
+
+      allow create: if isMember()
+        && incoming().keys().hasOnly(['callerId', 'calleeId', 'participants', 'type', 'status',
+                                      'offer', 'createdAt', 'updatedAt'])
+        && incoming().keys().hasAll(['callerId', 'calleeId', 'participants', 'type', 'status',
+                                     'offer', 'createdAt', 'updatedAt'])
+        && incoming().callerId == me()
+        && incoming().calleeId == otherOf(me())
+        && incoming().participants == [me(), otherOf(me())]
+        && incoming().type in ['audio', 'video']
+        && incoming().status == 'ringing'
+        && validSdp(incoming().offer, 'offer')
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+
+      // Terminal states (rejected, busy, cancelled, missed, ended, failed) have no
+      // outgoing transition, so they can never be changed again. callerId, calleeId,
+      // participants, type, offer and createdAt are never in an allowed key set.
+      allow update: if isMember()
+        && incoming().updatedAt == request.time
+        && (calleeAccepts() || calleeEndsRinging() || callerEndsRinging() || participantEndsActive());
+
+      allow delete: if false;
+
+      // ---- ICE candidates (ids "0".."99" → at most 100 docs per side) ----------
+      function callData() {
+        return get(/databases/$(database)/documents/calls/$(callId)).data;
+      }
+      function validCandidate(d) {
+        return d.keys().hasOnly(['candidate', 'sdpMid', 'sdpMLineIndex', 'usernameFragment',
+                                 'createdAt', 'expiresAt'])
+          && d.keys().hasAll(['candidate', 'createdAt', 'expiresAt'])
+          && d.candidate is string && d.candidate.size() > 0 && d.candidate.size() <= 1024
+          && (!('sdpMid' in d) || d.sdpMid == null || (d.sdpMid is string && d.sdpMid.size() <= 64))
+          && (!('sdpMLineIndex' in d) || d.sdpMLineIndex == null
+              || (d.sdpMLineIndex is int && d.sdpMLineIndex >= 0 && d.sdpMLineIndex < 64))
+          && (!('usernameFragment' in d) || d.usernameFragment == null
+              || (d.usernameFragment is string && d.usernameFragment.size() <= 256))
+          && d.createdAt == request.time
+          && d.expiresAt is timestamp
+          && d.expiresAt <= request.time + duration.value(2, 'd');
+      }
+
+      match /callerCandidates/{candidateId} {
+        allow read: if isMember();
+        allow create: if isMember()
+          && candidateId.matches('^[0-9]{1,2}$')
+          && callData().callerId == me()
+          && callData().status in ['ringing', 'accepted']
+          && validCandidate(incoming());
+        allow delete: if isMember() && callData().callerId == me();
+        allow update: if false;
+      }
+
+      match /calleeCandidates/{candidateId} {
+        allow read: if isMember();
+        allow create: if isMember()
+          && candidateId.matches('^[0-9]{1,2}$')
+          && callData().calleeId == me()
+          && callData().status in ['ringing', 'accepted']
+          && validCandidate(incoming());
+        allow delete: if isMember() && callData().calleeId == me();
+        allow update: if false;
+      }
+    }
+  }
+}

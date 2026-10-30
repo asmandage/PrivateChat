@@ -1,0 +1,29 @@
+# Dependencies for the optional rules tests
+node_modules/
+tests/node_modules/
+
+# Firebase CLI / emulator artefacts
+.firebase/
+.firebaserc
+firebase-debug.log*
+firestore-debug.log*
+ui-debug.log*
+*.log
+
+# Never commit credentials
+serviceAccount*.json
+*-service-account.json
+*.pem
+*.key
+.env
+.env.*
+
+# Local screenshots / scratch files (Windows Snipping Tool names like {GUID}.png)
+/{*}.png
+*.zip
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
