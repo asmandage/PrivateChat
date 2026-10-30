@@ -14,8 +14,12 @@ const KEY = 'config';
 /** Event kinds: m = new message, a = audio call, v = video call, mc = missed call. */
 export const NOTIFY_KINDS = ['m', 'a', 'v', 'mc'];
 
-/** Calls share one tag so "missed" replaces the "incoming" notification. */
-export const NOTIFY_TAGS = { m: 'pc-m', a: 'pc-c', v: 'pc-c', mc: 'pc-c' };
+/**
+ * One notification per tag: a newer event of the same tag replaces the older one and
+ * alerts again (renotify). Audio and video calls share 'pc-c'; when a missed-call
+ * notification is shown, the incoming-call one is closed.
+ */
+export const NOTIFY_TAGS = { m: 'pc-m', a: 'pc-c', v: 'pc-c', mc: 'pc-mc' };
 
 export const DEFAULT_NOTIFY_CONFIG = {
   title: 'Special Offer Update',

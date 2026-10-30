@@ -12,6 +12,7 @@
 import { getPrefs } from './settings.js';
 import { getNotifyConfig, renderNotification, NOTIFY_TAGS } from './notify-config.js';
 import { getServiceWorker } from './pwa.js';
+import { isPushActive } from './push.js';
 
 const BASE_TITLE = 'My Offers';
 const ICON = 'assets/icons/icon-192.png';
@@ -110,20 +111,25 @@ export function canNotify() {
 
 /**
  * Shows the coded notification for an event kind ('m' | 'a' | 'v' | 'mc') while the
- * page is open but not on screen. If a background push for the same event also
- * arrives, it carries the same tag and silently replaces this one (no second alert).
- * `force` is used by "Send test notification".
+ * page is open but not on screen. When background push is active on this device the
+ * service worker shows it instead (also when the app is closed), so it is not shown
+ * twice. `force` is used by "Send test notification".
  */
 export async function notifyPrivate(kind, { force = false } = {}) {
   if (!canNotify()) return false;
-  if (!force && document.visibilityState === 'visible') return false;
+  if (!force && (document.visibilityState === 'visible' || isPushActive())) return false;
   const cfg = await getNotifyConfig();
   const { title, body } = renderNotification(cfg, kind);
-  const options = { body, tag: NOTIFY_TAGS[kind], icon: ICON, badge: BADGE, silent: cfg.silent };
+  // renotify: a newer event replacing an older notification still alerts.
+  const options = { body, tag: NOTIFY_TAGS[kind], renotify: true, icon: ICON, badge: BADGE, silent: cfg.silent };
   try {
     const reg = await getServiceWorker();
-    if (reg) await reg.showNotification(title, options);
-    else new Notification(title, options);   // desktop browsers without a service worker
+    if (reg) {
+      await reg.showNotification(title, options);
+      if (kind === 'mc') closeNotification('a');   // the call is over
+    } else {
+      new Notification(title, options);   // desktop browsers without a service worker
+    }
     return true;
   } catch {
     return false;
@@ -165,6 +171,7 @@ export function resetNotifications() {
   stopRinging();
   closeNotification('m');
   closeNotification('a');
+  closeNotification('mc');
   titleOverride = '';
   setUnread(0);
 }
