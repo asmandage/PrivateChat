@@ -53,10 +53,13 @@ async function pushTo(uid, kind, ttlSeconds) {
   const targets = tokens.docs.filter((d) => authTime != null && d.get('authTime') === authTime);
   if (!targets.length) return;
 
+  // While a device is offline, pushes wait at the push service for up to TTL seconds
+  // and are delivered when it reconnects. `Topic` makes a newer push of the same kind
+  // replace one still waiting, so reconnecting shows one notification, not a burst.
   const result = await getMessaging().sendEach(targets.map((d) => ({
     token: d.get('token'),
     data: { k: kind },   // data-only: the service worker decides what is displayed
-    webpush: { headers: { Urgency: 'high', TTL: String(ttlSeconds) } },
+    webpush: { headers: { Urgency: 'high', TTL: String(ttlSeconds), Topic: `pc-${kind}` } },
   })));
 
   await Promise.all(result.responses.map((r, i) => (
