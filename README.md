@@ -1,16 +1,20 @@
 # PrivateChat
 
 A private web app for exactly **two people** with real-time chat, audio calls and video calls.
-It runs as a static site on **GitHub Pages**: no server, no build step, no Node.js at runtime.
+It can be installed to the home screen as an app (PWA). Notifications are coded: they never show who wrote, what was written, or who is calling.
+
+The site itself is static (GitHub Pages, no build step). Server-side logic lives in Firebase: security rules, plus three small Cloud Functions that send content-free push notifications.
 
 | Layer | Technology |
 |---|---|
 | UI | HTML5, CSS3, vanilla JavaScript ES modules (no framework) |
-| Auth | Firebase Authentication (email/password, two allowlisted UIDs) |
-| Data & signalling | Cloud Firestore (real-time listeners) |
-| Calls | WebRTC (`RTCPeerConnection`, `getUserMedia`), STUN, optional TURN |
+| App install | Web App Manifest + service worker (PWA) |
+| Auth | Firebase Authentication (email/password, two allowlisted UIDs), session-only sign-in, one active session per account |
+| Data & signalling | Cloud Firestore (real-time listeners), enforced by `firestore.rules` |
+| Calls | WebRTC (`RTCPeerConnection`, `getUserMedia`), STUN, optional TURN, ICE restart on network change |
+| Background push | Firebase Cloud Messaging + Cloud Functions (Node 22, **Blaze plan**) |
 | SDK | Firebase JS SDK **10.12.2** from `https://www.gstatic.com/firebasejs/` (one pinned version) |
-| Hosting | GitHub Pages (works under a sub-path such as `/CHATWEBAPK/`) |
+| Hosting | GitHub Pages (works under a sub-path such as `/PrivateChat/`), HTTPS |
 
 ---
 
@@ -21,9 +25,9 @@ It runs as a static site on **GitHub Pages**: no server, no build step, no Node.
 3. [Setup and deployment (step by step)](#3-setup-and-deployment-step-by-step)
 4. [TURN server (for networks where calls fail)](#4-turn-server-for-networks-where-calls-fail)
 5. [Firestore data model](#5-firestore-data-model)
-6. [Security model](#6-security-model)
+6. [Security and privacy model](#6-security-and-privacy-model)
 7. [Testing](#7-testing)
-8. [Known limitations](#8-known-limitations)
+8. [Platform limitations (read this)](#8-platform-limitations-read-this)
 9. [Cost and Firestore usage](#9-cost-and-firestore-usage)
 10. [Troubleshooting](#10-troubleshooting)
 
@@ -31,72 +35,112 @@ It runs as a static site on **GitHub Pages**: no server, no build step, no Node.
 
 ## 1. Features
 
-**Authentication**: email/password sign-in, persistent sessions, logout with confirmation, password-reset email, a loading state while the session is verified, and readable error messages. There is no sign-up, guest or anonymous access. Only the two allowlisted UIDs can use the app, and this is enforced by Firestore rules.
+**Install as an app (PWA)**
+- An "Install App" button appears on the login screen, in the sidebar header and in Settings → App whenever the browser can install the app: Chrome, Edge or Samsung Internet on Android, Windows, macOS and ChromeOS.
+- On iPhone and iPad the button shows the manual steps (Share → Add to Home Screen).
+- The installed app opens standalone, without the browser address bar. Its name is the neutral **"My Offers"** with a generic price-tag icon, because Android shows the app name and icon above every notification. Inside the app nothing else changes.
+- The service worker caches only the site's own HTML, CSS, JS and icons, never chat data.
+
+**Private (coded) notifications**
+- Notifications never contain names, phone numbers, profile pictures, message text or the call type. They only show a coded text you choose, for example *Special Offer Update — Your code M101 is available*.
+- You set a separate code per event in Settings → Notifications. The title, the text template (`{code}` is replaced) and the silent mode are configurable too.
+
+  | Event | Default title | Default text |
+  |---|---|---|
+  | New message | Special Offer Update | Your code M101 is available |
+  | Audio call | Special Offer Update | Your code C101 is available |
+  | Video call | Special Offer Update | Your code V101 is available |
+  | Missed call | Special Offer Update | Your code MC101 is available |
+
+- The codes are stored **only on the device** (IndexedDB). The push payload sent through Google carries just an event kind (`m`, `a`, `v` or `mc`), and the service worker turns it into your text.
+- Tapping a notification only dismisses it. It never opens a conversation.
+- Notifications are delivered in two ways. While the app is open but not on screen (for example a background tab), the page shows them. With background push (Blaze + Cloud Functions) they also arrive while the app or browser is closed, wherever the OS allows. When both paths fire for the same event, they share a tag, so you only see one notification.
+- The silent option uses the OS default with no app-specific ringtone. The in-app ringtone only plays while the app is open.
 
 **Messaging**
 - Real-time chat bubbles with sent/received styling, day separators and timestamps.
 - Delivery ticks: 🕓 sending → ✓ sent → ✓✓ delivered → ✓✓ (cyan) read.
 - Typing indicator and online / "last seen" status.
-- The view auto-scrolls when you are at the bottom. Otherwise a "new messages" button appears.
-- Multiline input. On desktop, Enter sends and Shift+Enter adds a new line. On phones, the send button sends.
-- Empty messages are blocked, and messages over 4000 characters are blocked with a counter.
-- Duplicate-send protection: a client-generated id plus create-only rules.
-- Long messages collapse behind "Show more", and long words wrap.
-- Older messages load page by page as you scroll up.
-- "Delete for everyone" for your own messages.
-- Loading skeletons plus empty, error/retry and offline states.
+- Auto-scroll at the bottom, with a "new messages" button otherwise.
+- Multiline input. On desktop, Enter sends and Shift+Enter adds a new line.
+- Empty messages and messages over 4000 characters are blocked. Duplicate sends are prevented.
+- Long messages collapse behind "Show more". Older messages load as you scroll up.
 - Unread counter on the contact, in the tab title and as the app badge where supported.
 
+**Deleting history** (every deletion asks for confirmation first)
+
+| What | Delete for me | Delete for everyone |
+|---|---|---|
+| One message (tap it, then 🗑) | Hidden from your view on every device you sign in to | Your own messages only: replaced by "This message was deleted" for both |
+| Whole conversation (🗑 in the chat header) | Every message is hidden from your view | **Every message is permanently erased for both people** |
+| All chat history (Settings → Chat history) | Messages and call history hidden from your view | All messages and all finished calls permanently erased for both |
+
+Deletions are stored in Firestore, so they survive refresh, logout and logging in on another device. The rules ensure only the two members can delete anything. "For everyone" on the whole conversation is allowed to either person, by design.
+
 **Audio and video calls**
-- Start, ring, accept, decline, cancel and end calls.
-- Ringing / connecting / reconnecting states and a duration timer.
-- 40-second no-answer timeout, which records a missed call.
-- Busy handling, and glare handling (both people press "call" at the same moment).
-- Microphone mute, camera on/off and camera switching, with the remote side shown when the other person is muted or has their camera off.
-- Draggable picture-in-picture self view.
-- Clear messages when permission is denied, a device is missing or a device is busy.
-- Connection-failure handling with a hint about TURN.
-- Stale-call protection.
-- Full cleanup when a call ends: tracks are stopped (the camera light turns off), the peer connection is closed, listeners are detached and our ICE docs are deleted.
-- The screen is kept awake during calls where the browser supports it.
+- Start, ring, accept, decline, cancel and end calls. A no-answer timeout records a missed call, and busy and glare (both call at once) are handled.
+- States shown in the app: Calling → Ringing → Connecting → Connected (with a timer) → Reconnecting → ended, declined, missed or disconnected. Call history includes missed calls.
+- **Reconnection:** if the network changes mid-call (for example Wi-Fi to mobile data), the caller restarts ICE. The call only ends if it can't recover within 30 s.
+- Mute, camera on/off, camera switching and a draggable self-view. The screen stays awake during calls.
+- **Audio privacy notice:** the call screen shows "Headphones detected", or a warning that audio may play on the loudspeaker. The app never switches to the loudspeaker itself. See §8 for why it can't force the earpiece.
 
-**Notifications**: an original ringtone generated with Web Audio (no audio files), a message sound, browser notifications while the page is open in the background, missed-call toasts (including "missed while you were away"), and a call history list with call-back buttons.
+**Permissions**
+- Notifications, microphone and camera are each requested only after a related tap: notifications from the Settings switch, the microphone when starting or answering a call, the camera only for video calls.
+- The current state is checked first. If the browser is about to ask, a short explanation appears beforehand.
+- If access is blocked, the app never re-triggers the browser prompt. It shows platform-specific steps (Android, iPhone, desktop) to re-enable access.
 
-**Settings**: theme (system / light / dark), sound and notification preferences, microphone / camera / speaker selection, display name, app info and logout. Preferences are stored in `localStorage`. No secrets are stored there.
+**Sign-in and sessions**
+- **Session-only sign-in.** The password is required again after the browser tab, the browser or the installed app has been closed. The sign-in token lives in sessionStorage, never in localStorage, and passwords are never stored. If a browser restores a closed session ("continue where you left off"), the app signs it out unless it was in use within the last 10 minutes.
+- **One active session per account, enforced by the server.** A new login on another device takes over immediately. The rules reject every request from the old sign-in, even with an unexpired token. The old device is notified in real time, ends any call, drops all chat data from memory and shows *"Your account was logged in on another device."*
+- Chat data is cached **in memory only**, so nothing is left on the device after closing or signing out.
+- Logout asks for confirmation, stops push to that device and reloads the page.
+
+**Settings:** theme, sounds, private notifications and codes, microphone, camera and (desktop) speaker selection, chat history deletion, app install, display name, app info and logout.
 
 ---
 
 ## 2. Project structure
 
 ```
-CHATWEBAPK/                  # repository root = GitHub Pages site root
+PrivateChat/                 # repository root = GitHub Pages site root
 ├── index.html               # single page: login, chat, call UI, modals, inline SVG icon sprite
+├── manifest.json            # PWA manifest (neutral name "My Offers")            [new]
+├── sw.js                    # service worker: app-shell cache + coded push        [new]
 ├── README.md
 ├── .gitignore
 ├── .nojekyll                # tells GitHub Pages to serve files as-is
 ├── firestore.rules          # ⚠ put your two UIDs here
 ├── firestore.indexes.json   # composite index + TTL policies
-├── firebase.json            # only for the optional Firebase CLI / emulator
+├── firebase.json            # Firebase CLI: rules, indexes, functions, emulator
 ├── css/
 │   ├── style.css            # design tokens (light/dark), base, login, modals, toasts
 │   ├── chat.css             # layout, sidebar, messages, composer
 │   ├── calls.css            # incoming call + in-call screen
 │   └── responsive.css       # mobile / landscape rules
 ├── js/
-│   ├── firebase-config.js   # ⚠ your Firebase config, the two UIDs, STUN/TURN
-│   ├── firebase.js          # SDK initialisation (+ optional App Check)
+│   ├── firebase-config.js   # ⚠ your Firebase config, the two UIDs, VAPID key, STUN/TURN
+│   ├── firebase.js          # SDK initialisation (session-only auth, memory cache, App Check)
 │   ├── theme-boot.js        # applies theme before first paint; anti-clickjacking
 │   ├── app.js               # entry point, session lifecycle, presence UI, mobile navigation
 │   ├── auth.js              # login form, allowlist check, logout, password reset
-│   ├── chat.js              # messages, pagination, receipts, composer
-│   ├── presence.js          # online/typing/read markers, server clock offset
-│   ├── calls.js             # call signalling state machine + call UI + call history
+│   ├── session.js           # single active session + restored-session guard     [new]
+│   ├── chat.js              # messages, pagination, receipts, composer, deletion
+│   ├── presence.js          # online/typing/read/clear markers, server clock offset
+│   ├── calls.js             # call signalling state machine, ICE restart, call UI, history
 │   ├── webrtc.js            # media capture, ICE servers, RTCPeerConnection wrapper
-│   ├── notifications.js     # tones, browser notifications, unread/title
+│   ├── notifications.js     # tones, coded notifications, unread/title
+│   ├── notify-config.js     # coded notification texts (stored on the device)    [new]
+│   ├── push.js              # FCM token registration for background push         [new]
+│   ├── pwa.js               # service worker registration + Install App buttons  [new]
+│   ├── permissions.js       # permission checks, explanations, re-enable help   [new]
 │   ├── settings.js          # preferences, theme, devices, settings modal
 │   └── ui.js                # DOM helpers, toasts, dialogs, formatting
-├── assets/icons/favicon.svg
-└── tests/                   # optional: Firestore rules tests (Node + emulator), not needed for hosting
+├── assets/icons/            # app-icon.svg, icon-192/512.png, icon-maskable-512.png,
+│                            # apple-touch-icon.png, badge-96.png (+ old favicon.svg)
+├── functions/               # Cloud Functions (Blaze plan) — not served by GitHub Pages [new]
+│   ├── package.json
+│   └── index.js             # ⚠ REGION + the two UIDs
+└── tests/                   # Firestore rules tests (Node + emulator)
     ├── package.json
     └── rules.test.mjs
 ```
@@ -105,7 +149,7 @@ CHATWEBAPK/                  # repository root = GitHub Pages site root
 
 ## 3. Setup and deployment (step by step)
 
-You will configure Firebase first, then upload to GitHub Pages. Allow about 20–30 minutes.
+> **Upgrading an existing installation?** Do Steps 6, 7b, 7c and 14 (rules, plan, push, functions), then deploy the site. Publish the **rules first** and the **site right after**: the new app needs the new rules (`sessions/`), and old open tabs simply need a reload. Everyone signs in once more after the upgrade.
 
 ### Step 1: Create a Firebase project
 1. Open <https://console.firebase.google.com> and click **Create a project**.
@@ -114,108 +158,125 @@ You will configure Firebase first, then upload to GitHub Pages. Allow about 20�
 ### Step 2: Register a web app and copy its config
 1. In **Project settings → General → Your apps**, click the **Web** icon (`</>`).
 2. Give it a nickname. You do **not** need Firebase Hosting.
-3. Copy the `firebaseConfig` values into `js/firebase-config.js` → `FIREBASE_CONFIG`.
-   These values are public identifiers, not secrets.
+3. Copy the `firebaseConfig` values into `js/firebase-config.js` → `FIREBASE_CONFIG`. These values are public identifiers, not secrets.
 
 ### Step 3: Enable email/password sign-in and block self-registration
 1. **Authentication → Get started → Sign-in method → Email/Password → Enable** (leave "Email link" off).
 2. **Authentication → Settings → User actions**: **untick "Enable create (sign-up)"** and **untick "Enable deletion"**.
-   Without this, anyone with your public API key could create accounts through the REST API. Those accounts would still be blocked by the rules, but there is no reason to allow them.
 3. Leave **Email enumeration protection** enabled (the default).
 
 ### Step 4: Create exactly two users and get their UIDs
 1. **Authentication → Users → Add user**: enter the email and a strong password for person 1, then repeat for person 2.
-2. Copy each user's **User UID** from the Users table (a string like `x8Gd2…`).
+2. Copy each user's **User UID** from the Users table.
 
-### Step 5: Put the UIDs in BOTH places
-- `js/firebase-config.js` → `ALLOWED_UIDS = ['UID_OF_PERSON_1', 'UID_OF_PERSON_2']`
-- `firestore.rules` → replace `REPLACE_WITH_USER_1_UID` and `REPLACE_WITH_USER_2_UID`
+### Step 5: Put the UIDs in ALL THREE places
+- `js/firebase-config.js` → `ALLOWED_UIDS`
+- `firestore.rules` → `user1Uid()` / `user2Uid()`
+- `functions/index.js` → `ALLOWED_UIDS`
 
 The rules are the real security boundary. The JavaScript list only shows a friendly error.
 
 ### Step 6: Create the Firestore database and publish the rules
-1. **Firestore Database → Create database** → choose **Production mode** and a location near you.
-   The location cannot be changed later.
-2. Open the **Rules** tab, replace everything with the contents of your edited `firestore.rules`, and click **Publish**.
+1. **Firestore Database → Create database** → choose **Production mode** and a location near you. Note the location: the Cloud Functions must use the matching region (Step 14).
+2. Open the **Rules** tab, replace everything with your edited `firestore.rules`, and click **Publish**. Or run `firebase deploy --only firestore` (Step 14).
 
 ### Step 7: Create the index and TTL policies
-**Composite index (required for call history).** Go to **Firestore → Indexes → Composite → Create index** and enter:
+**Composite index (required for call history).** Go to **Firestore → Indexes → Composite → Create index**:
 - Collection ID: `calls`
 - Fields: `participants` → **Arrays**, then `createdAt` → **Descending**
 - Query scope: Collection
 
-Alternatively, run the app once. The browser console then shows an error with a direct link that creates the index. It takes a few minutes to build.
+This one index also serves the "call history deleted for me" query. The message queries only need automatic single-field indexes.
 
 **TTL policies (recommended)** delete old ICE-candidate documents automatically. Go to **Firestore → Time-to-live → Create policy** twice:
 - Collection group `callerCandidates`, timestamp field `expiresAt`
 - Collection group `calleeCandidates`, timestamp field `expiresAt`
 
-If you use the Firebase CLI instead, `firebase deploy --only firestore` deploys the rules, the index and the TTL settings from `firestore.indexes.json`.
+### Step 7b: Upgrade to the Blaze plan (needed for background push)
+Background notifications need a server to send them, and Firebase only runs Cloud Functions on the pay-as-you-go **Blaze** plan.
+1. In the Firebase console, open **Usage and billing → Details & settings → Modify plan → Blaze**, then link a billing account.
+2. **Set a budget alert** (Google Cloud → Billing → Budgets & alerts), for example at 1 USD/month.
+
+Two users normally stay inside the free quotas (see §9). This is likely but not guaranteed.
+
+If you skip this step, everything else still works. Coded notifications then appear only while the app is open, for example in a background tab.
+
+### Step 7c: Create the Web Push key (VAPID)
+1. **Project settings → Cloud Messaging → Web configuration → Web Push certificates → Generate key pair.**
+2. Copy the **public** key into `js/firebase-config.js` → `FCM_VAPID_KEY`. It is public by design.
+3. If you restricted the browser API key by **API** (Google Cloud → Credentials), also allow **Firebase Installations API** and **FCM Registration API**.
 
 ### Step 8: Create the GitHub repository
-1. On GitHub, create a new repository, for example `CHATWEBAPK`.
-   It can be public, because no secrets are in the code. A private repository needs a paid plan for Pages.
-2. Upload the **contents** of this folder (so `index.html` is at the repository root): **Add file → Upload files** → drag everything in, including the `css`, `js` and `assets` folders and `.nojekyll`. Then commit.
-   - Hidden files such as `.nojekyll` and `.gitignore` may not show in your file picker. Drag-and-drop the folder contents, or create `.nojekyll` (empty) on GitHub with **Add file → Create new file**.
-   - `tests/` and `firebase.json` are optional. They are harmless to upload.
+1. Create a repository, for example `PrivateChat`. It can be public, because no secrets are in the code.
+2. Upload the **contents** of this folder so that `index.html`, `manifest.json` and `sw.js` sit at the repository root.
 
-### Step 9: Enable GitHub Pages
-1. Open **Settings → Pages**. Under **Build and deployment**, set Source to **Deploy from a branch**, Branch to **main**, and folder to **/ (root)**. Click **Save**.
-2. After a minute your site is live at `https://asmandage.github.io/CHATWEBAPK/`.
-   All paths in the app are relative, so the sub-path works.
+### Step 9: Enable GitHub Pages (HTTPS)
+1. **Settings → Pages → Build and deployment**: Source **Deploy from a branch**, Branch **main**, folder **/ (root)** → **Save**.
+2. Tick **Enforce HTTPS**. PWAs, service workers, push, the camera and the microphone all require HTTPS. GitHub Pages provides it for `*.github.io`.
+3. After a minute the site is live at `https://<user>.github.io/PrivateChat/`. All paths are relative, so the sub-path works, including the service worker scope.
 
 ### Step 10: Authorize the GitHub Pages domain in Firebase
-Go to **Authentication → Settings → Authorized domains → Add domain** and add `asmandage.github.io`. Do not include a path or `https://`.
+**Authentication → Settings → Authorized domains → Add domain** → `<user>.github.io`, without a path or `https://`.
 
 ### Step 11: Harden the API key (recommended)
-In the **Google Cloud Console → APIs & Services → Credentials**, open the "Browser key" that Firebase created. Under **Application restrictions → Websites**, add:
-- `https://asmandage.github.io/*`
-- `http://localhost/*` (if you test locally)
+In **Google Cloud Console → APIs & Services → Credentials**, open the "Browser key". Under **Application restrictions → Websites**, add `https://<user>.github.io/*` (and `http://localhost/*` for local tests).
 
 ### Step 12 (optional): App Check
-App Check makes it harder for scripts outside your site to use your Firebase project.
-1. Create a **reCAPTCHA v3** key at <https://www.google.com/recaptcha/admin> for the domain `asmandage.github.io`.
-2. In **Firebase → App Check**, register the web app with the reCAPTCHA v3 provider (enter the secret key there, never in the code).
-3. Put the **site key** in `APP_CHECK_SITE_KEY` in `js/firebase-config.js` and redeploy.
-4. Watch the App Check metrics for a few days. Once all requests are verified, click **Enforce** for Cloud Firestore.
-
-App Check raises the bar, but it is not authentication: a determined attacker using a real browser can still pass reCAPTCHA. The UID-allowlist rules remain the actual protection.
+Create a reCAPTCHA v3 key for your domain, register it in **Firebase → App Check**, put the **site key** in `APP_CHECK_SITE_KEY`, and enforce App Check once its metrics look clean. App Check raises the bar, but it is not authentication. The UID allowlist rules remain the protection.
 
 ### Step 13: First run and two-device test
-1. Open the site on device A and sign in as person 1. Then open it on device B (different network if possible) and sign in as person 2.
-2. Send messages both ways, and check typing, ticks and refresh.
-3. Start an audio call, then a video call. Allow camera and microphone when the browser asks.
-4. Work through the [testing checklist](#7-testing).
+Open the site on two devices, sign in as each person, and follow the [testing guide](#7-testing).
 
-To update the site later, edit the files on GitHub (or upload replacements). Pages republishes automatically. If you change `firestore.rules`, publish them again in the Firebase console.
+### Step 14: Deploy the Cloud Functions (background push)
+Do this on a computer with **Node.js 22+**:
+```bash
+npm install -g firebase-tools
+firebase login
+firebase use --add            # choose your project
+cd functions && npm install && cd ..
+# ⚠ first set REGION and ALLOWED_UIDS in functions/index.js
+firebase deploy --only functions,firestore
+```
+The first deploy enables the Cloud Functions, Eventarc and Artifact Registry APIs. Accept the prompts.
+
+`REGION` must match the Firestore location: `nam5` → `us-central1`, `eur3` → `europe-west1`, otherwise the same region name, for example `asia-south1`.
+
+The functions are:
+- `notifyNewMessage`: new message → `{k:'m'}`
+- `notifyIncomingCall`: new ringing call → `{k:'a'}` or `{k:'v'}`, with a 40 s TTL
+- `notifyMissedCall`: unanswered or cancelled call → `{k:'mc'}`
+
+To update the site later, push to GitHub. Pages republishes and the service worker fetches new files network-first. After changing `firestore.rules` or `functions/`, deploy them again.
 
 ---
 
 ## 4. TURN server (for networks where calls fail)
 
-WebRTC first tries a **direct peer-to-peer** connection, using free Google STUN servers to discover public addresses. This works on most home Wi-Fi and many mobile networks, but **not all**. Symmetric NATs, some carrier-grade NATs, strict corporate or school firewalls, and some hotel networks block direct connections. Then the call shows *"Could not connect … a TURN relay is needed"*.
+WebRTC first tries a **direct peer-to-peer** connection, using free Google STUN servers. This works on most home Wi-Fi and many mobile networks, but **not all**. Symmetric NATs, some carrier-grade NATs, strict corporate or school firewalls, and some hotel networks block it. The call then shows *"Could not connect … a TURN relay is needed"*.
 
-A **TURN server** relays the encrypted media when a direct path is impossible.
-- **Cost:** relaying uses bandwidth, so TURN services usually charge. Some offer free tiers, and you can self-host *coturn* on a small VM.
-- **Never put a TURN shared secret (static auth secret) in this repo.** Everything in a GitHub Pages site is public.
+A **TURN server** relays the still end-to-end encrypted media (DTLS-SRTP). Relaying uses bandwidth, so TURN services usually charge. **Never put a TURN shared secret in this repo.** Two safe options are supported in `js/firebase-config.js`:
+1. **`TURN_CREDENTIALS_URL`**: a provider endpoint returning short-lived credentials (`[{urls, username, credential}]` or `{iceServers:[…]}`).
+2. **A static entry in `ICE_SERVERS`**, only with restricted, rotatable credentials.
 
-Two safe options are supported in `js/firebase-config.js`:
-1. **`TURN_CREDENTIALS_URL`**: a provider endpoint that returns short-lived credentials as JSON (`[{urls, username, credential}]` or `{iceServers:[…]}`). The app fetches it at call time and falls back to STUN-only if it fails.
-   Note: if the URL embeds an API key, that key is public. Use a provider whose key only issues short-lived TURN credentials and can be domain-restricted or rate-limited.
-2. **A static entry in `ICE_SERVERS`**, only with credentials you can rotate and that are restricted on the provider side.
-
-Media relayed through TURN is still end-to-end encrypted (DTLS-SRTP). The relay cannot decode it.
-
-Without TURN, the app cannot promise that every call will connect. This is a limit of peer-to-peer networking, not of the app.
+TURN also makes ICE restarts after network changes far more reliable.
 
 ---
 
 ## 5. Firestore data model
 
 ```
+sessions/{uid}
+  authTime (int, = auth_time of the account's newest sign-in), updatedAt
+
 users/{uid}
   uid, displayName, state ('online'|'offline'), lastActive,
-  typing (bool), typingAt, lastReadAt, lastDeliveredAt
+  typing (bool), typingAt, lastReadAt, lastDeliveredAt,
+  [clearedAt]        messages up to here are deleted for this user
+  [callsClearedAt]   call history up to here is deleted for this user
+  [wipedAt]          this user erased the conversation for everyone (other app reloads)
+
+users/{uid}/hiddenMessages/{messageId}   createdAt            (single messages deleted for me)
+users/{uid}/pushTokens/{sha256(token)}   token, authTime, updatedAt   (owner + Cloud Functions only)
 
 conversations/main/messages/{messageId}
   senderId, text (≤4000), createdAt (server time), deleted (bool), [deletedAt]
@@ -223,140 +284,171 @@ conversations/main/messages/{messageId}
 calls/{callId}
   callerId, calleeId, participants [caller, callee], type ('audio'|'video'),
   status, offer {type,sdp}, [answer {type,sdp}],
-  createdAt, updatedAt, [acceptedAt, endedAt, endedBy, endReason]
+  createdAt, updatedAt, [acceptedAt, endedAt, endedBy, endReason],
+  [restartN, restartOffer {type,sdp}, restartAnswerN, restartAnswer {type,sdp}]   (ICE restarts)
 
 calls/{callId}/callerCandidates/{"0".."99"}   candidate, sdpMid, sdpMLineIndex, usernameFragment, createdAt, expiresAt
 calls/{callId}/calleeCandidates/{"0".."99"}   (same)
 ```
 
 Design choices:
-- **Read receipts and typing cost no per-message writes.** Each user keeps `lastReadAt` / `lastDeliveredAt` timestamps on their own profile. A message is "read" when the peer's `lastReadAt ≥ message.createdAt`.
-- **Bounded listeners.** There is one live listener on the newest 30 messages. Older pages are fetched once with `getDocs` + `startAfter`. Call history is limited to the last 15 calls.
-- **No duplicates.** The client generates a message id and writes it with `setDoc`. The rules allow *create* only, so a retry cannot create a second copy.
-- **Server time everywhere.** `createdAt == request.time` is enforced, so ordering cannot be faked by a wrong device clock. The app also estimates its clock offset from the server once per session. That offset is used for "online", "typing" and stale-call decisions.
-- **Bounded ICE.** Candidate doc ids must match `^[0-9]{1,2}$`, which allows at most 100 per side per call. Each client deletes its own candidates when a call ends, and TTL (`expiresAt`, at most 2 days) is the backstop.
-- **Offline cache.** The persistent IndexedDB cache makes reloads cheaper and lets messages queue while offline.
+- **Single active session.** `auth_time` is set by Google at sign-in and signed into every ID token of that sign-in. On sign-in the app writes it to `sessions/{uid}`. The rules allow that only when it is not older than the stored value, so the newest login always wins a race. Every other rule requires `request.auth.token.auth_time == sessions/{uid}.authTime`.
+- **Deletion markers are server-side.** Queries ask only for messages and calls after `clearedAt` / `callsClearedAt`, so cleared history never comes back after a refresh or a new login.
+- **Read receipts and typing cost no per-message writes** (`lastReadAt` / `lastDeliveredAt` markers).
+- **Bounded listeners.** One live listener covers the newest 30 messages, with pagination for older ones, and call history shows the last 15 calls.
+- **No duplicates.** Message ids are generated by the client, and the rules are create-only.
+- **Server time everywhere** (`createdAt == request.time`), plus a per-session clock-offset estimate.
+- **Bounded ICE.** Candidate ids are `0..99` per side per call. A TTL policy cleans them up.
 
 ### Call state machine (enforced by rules)
 
 ```
              callee: accepted (+answer)              either: ended | failed
  ringing ───────────────────────────────▶ accepted ─────────────────────────▶ (terminal)
-    │ callee: rejected | busy | missed
+    │ callee: rejected | busy | missed      ↺ caller: restartOffer n+1 / callee: restartAnswer n
     │ caller: cancelled | missed
     ▼
  (terminal)
 ```
-
-- Only the **callee** may accept, reject or report busy. Only the **caller** may cancel. Either may record "missed" from `ringing`.
-- `accepted → ended/failed` must set `endedBy` to the person writing it.
-- `callerId`, `calleeId`, `participants`, `type`, `offer` and `createdAt` can never change after creation, because they are absent from every allowed key set.
-- Terminal states have no allowed outgoing transition, so a finished call cannot be "revived".
-- Candidates may only be written by the matching role, and only while the call is `ringing` or `accepted`.
-- **Glare:** if both people call at the same instant, the person with the lexicographically smaller UID keeps their call. The other cancels theirs (marked `endReason: 'collision'`) and sees the incoming call.
-- **Stale calls:** a `ringing` call older than about 50 seconds (server-corrected) is ignored and marked `missed`. "Busy" is decided from local state, so an abandoned `accepted` document never blocks future calls.
+Terminal calls can be deleted by a participant ("clear history for everyone"). Ringing and accepted calls can't be deleted, except an accepted call abandoned for more than a day.
 
 ---
 
-## 6. Security model
+## 6. Security and privacy model
 
-**What is enforced server-side (`firestore.rules`):**
-- Every read and write requires a signed-in user whose UID is one of the two allowlisted UIDs. Everyone else, including other accounts in the same Firebase project, gets nothing.
-- Only the known paths exist. There are no recursive wildcards, and everything else is denied.
-- Users can write only their own profile, with a fixed set of fields, validated types and no future timestamps.
-- Messages: `senderId` must equal the writer (no impersonation), the text must be 1–4000 non-blank characters, the keys must be exactly the allowed set, and `createdAt` must be server time. There are no edits. Only the sender may "delete for everyone" (blank the text), and hard deletes are denied.
-- Calls: creator must be the caller, the callee must be the other member, and every transition follows the state machine above.
+**Enforced server-side (`firestore.rules`, tested in `tests/rules.test.mjs`):**
+- Every read and write requires one of the two allowlisted UIDs **and** the account's current session (`auth_time` check). Old sessions are rejected immediately, even with unexpired tokens.
+- Only known paths exist, and everything else is denied.
+- Users write only their own profile, deletion markers, hidden list and push tokens. Push tokens are never readable by the other member.
+- Messages: no impersonation, validated text, server time, no edits. Only the sender can blank a message. Either member may erase messages (the whole-conversation wipe, by the owners' decision).
+- Calls: only the participants, with every transition following the state machine above, including ICE restarts.
+
+**Cloud Functions (`functions/index.js`)** run with admin rights but only read `sessions/` and `pushTokens`. They send `{k: kind}` and nothing else, only to tokens of the recipient's current session. Their logs contain the event kind and counts only.
 
 **Client-side measures:**
-- All user text is rendered with `textContent` (never `innerHTML`).
-- A Content-Security-Policy meta tag (no inline scripts, scripts only from self, gstatic and reCAPTCHA) and frame-busting against clickjacking.
-- No passwords are stored by the app. Firebase Auth keeps its own session token in IndexedDB.
-- Console logs contain error codes only, never message text or SDP.
+- All user text is rendered with `textContent`. A strict Content-Security-Policy meta tag and frame-busting are in place.
+- No passwords anywhere in storage. The auth token is in sessionStorage. Chat data is held in memory only, and old IndexedDB caches from v1 are deleted on start.
+- After logout or session takeover, the page reloads so no copy of the conversation remains.
+- Notifications use only the on-device codes. Notification content, codes and tokens are never logged. Console logs contain error codes only.
+- The service worker never caches Firebase traffic.
 
 **Limitations a static site cannot remove:**
-- The Firebase config and API key are public by design. Protection comes from the rules (plus optional App Check and API-key referrer restrictions).
-- Anyone can *attempt* to sign in. Firebase rate-limits failed attempts, but strong, unique passwords are essential.
-- If either account is compromised, the attacker sees everything that user can see.
-- Messages are encrypted in transit and at rest by Google, but they are **not end-to-end encrypted**: anyone with admin access to the Firebase project can read them. Calls are end-to-end encrypted (DTLS-SRTP) between the two browsers.
-- Peer-to-peer calls reveal each person's IP address to the other, which is inherent to WebRTC. To hide it, configure TURN and set `ICE_TRANSPORT_POLICY = 'relay'` in `js/firebase-config.js`.
-- Rules cannot verify honesty about presence or typing state, or enforce timeouts. These are cosmetic and only affect the two trusted users.
-- GitHub Pages cannot send security headers, so the CSP is a `<meta>` tag. It cannot express `frame-ancestors`, which is why the JavaScript frame-busting exists.
+- The Firebase config and API key are public by design. Protection comes from the rules, plus optional App Check and API-key restrictions.
+- If either account's password is compromised, the attacker sees what that user sees. Logging in also signs the real user out, which at least makes it visible.
+- Messages are encrypted in transit and at rest by Google, but they are **not end-to-end encrypted**: project admins can read them. Calls are end-to-end encrypted (DTLS-SRTP).
+- Peer-to-peer calls reveal each person's IP address to the other. Use TURN with `ICE_TRANSPORT_POLICY = 'relay'` to hide it.
+- GitHub Pages cannot send security headers, so the CSP is a `<meta>` tag.
 
 ---
 
 ## 7. Testing
 
 ### 7.1 Automated Firestore rules tests (emulator)
-These tests cover the "Security" checklist: unauthorized reads and writes, sender spoofing, call-signalling impersonation, invalid data, terminal states and candidate limits.
-
-Requirements: Node.js 18+ and Java 11+ (for the emulator).
+Requires Node.js 18+ and Java 11+.
 ```bash
 cd tests
 npm install
 npm test        # starts the Firestore emulator and runs node --test rules.test.mjs
 ```
-The test file reads `../firestore.rules`. If the UIDs are still placeholders, it substitutes test UIDs. If you have already inserted your real UIDs, it extracts and uses them.
+Covers: the allowlist, single active session (claim, take-over, stale tokens rejected, forged `auth_time`), messages, delete-for-me markers, push-token privacy, conversation wipe (in 20-document batches), call state machine, ICE restarts, call deletion and ICE candidates.
 
-### 7.2 Manual checklist (two real devices)
+### 7.2 Android (Chrome), browser tab
+1. Open `https://<user>.github.io/PrivateChat/`. The login screen shows **Install App** after a few seconds, once Chrome decides the app is installable.
+2. Sign in, then send messages both ways.
+3. Open **Settings → Notifications → Private notifications**. An explanation appears, then Chrome's prompt; allow it. Save your codes and tap **Send test**: you should see your coded title and text.
+4. Switch to another app and send a message from the other device. The notification shows only your coded text, and tapping it just dismisses it.
+5. Start an audio call. The microphone explanation appears, then Chrome's prompt. While connected, the call screen shows the audio-route pill. Without headphones it says *May play on loudspeaker — use headphones*.
+6. Toggle Wi-Fi off and on during a call: the screen shows "Reconnecting…", then the call continues (or ends after about 30 s if no network returns).
+7. Close Chrome completely (swipe it away) and reopen the page. The password is required.
 
-Status at delivery is recorded honestly below. Items marked **Pending** need your Firebase project and two devices, and could not be run in the build environment.
+### 7.3 Android, installed app (PWA)
+1. Tap **Install App** → Install. "My Offers" appears on the home screen and opens without the address bar.
+2. Sign in, turn on private notifications and confirm Settings shows *"Background notifications are active on this device"*.
+3. Close the app (swipe it away). From the other device, send a message, place a call and let it go unanswered. Expected: coded notifications for M, C (or V) and MC, which only dismiss when tapped.
+4. Open the app within 40 s of a call push. It asks for the password (session-only), and once you sign in the call is still ringing and can be answered.
+5. Device check: Android Settings → Apps → My Offers → Notifications must be allowed, and battery optimisation set to "unrestricted" for reliable push on Xiaomi, Oppo, Vivo, Samsung and similar.
 
-| Area | Test | Status |
-|---|---|---|
-| Build | All modules and the Firebase SDK load and link in Chrome with no errors | ✅ Verified (headless Chrome) |
-| Build | Placeholder config shows the "Setup required" screen | ✅ Verified |
-| Auth | Login screen renders. A failed sign-in shows a readable error from the real Firebase Auth API | ✅ Verified (dummy config) |
-| UI | Desktop, phone and dark-mode layouts. Call and incoming-call screens. No horizontal overflow | ✅ Verified visually with sample DOM (not live data) |
-| Rules | `tests/rules.test.mjs` passes | ⏳ Pending: Node/Java were unavailable in the build environment. Run §7.1 |
-| Auth | Both authorized users can log in | ⏳ Pending |
-| Auth | A third account (if sign-up is still enabled) is rejected with "not authorized" and cannot read data | ⏳ Pending |
-| Auth | Refresh keeps you signed in. Logout works | ⏳ Pending |
-| Chat | User 1 → User 2 arrives in real time. Reply works | ⏳ Pending |
-| Chat | Messages persist after refresh. "Load earlier" works with more than 30 messages | ⏳ Pending |
-| Chat | Ticks go sent → delivered → read. Typing indicator appears and disappears | ⏳ Pending |
-| Chat | A long message, HTML like `<b>x</b>` and emoji render as plain text | ⏳ Pending |
-| Chat | Offline send queues (🕓) and delivers on reconnect | ⏳ Pending |
-| Calls | Audio call: ring, accept, audio both ways, mute/unmute, end | ⏳ Pending |
-| Calls | Video call: both videos, camera off/on, switch camera (phone), end | ⏳ Pending |
-| Calls | Decline, cancel while ringing, and no answer (40 s) produce a missed-call toast and history entry | ⏳ Pending |
-| Calls | Both press call at the same moment: one call survives and connects after accept | ⏳ Pending |
-| Calls | Deny the mic/camera permission: a clear message appears and the other side sees "declined" | ⏳ Pending |
-| Calls | Turn Wi-Fi off mid-call: "Reconnecting…", then the call ends after about 12 s if not recovered | ⏳ Pending |
-| Calls | Close the tab while ringing, reopen, and call again: the new call works (no stale block) | ⏳ Pending |
-| Calls | After hanging up, the camera/mic indicator light turns off | ⏳ Pending |
-| Mobile | Android Chrome and iOS Safari: layout, keyboard, call controls reachable, rotation | ⏳ Pending |
+### 7.4 Desktop (Chrome / Edge)
+1. Click the install icon in the address bar or the **Install App** button. The app opens in its own window.
+2. Notifications, calls, deletion and session tests work the same as on Android. In Settings → Audio & video devices, choose a headset as the speaker. The call pill then shows "Headphones detected".
+
+### 7.5 iPhone / iPad (Safari, iOS 16.4+)
+1. Tap **Install App** to see the steps: Share → Add to Home Screen → Add. Open the app from the Home Screen.
+2. Notifications only work in the Home Screen app: turn them on in Settings inside the app.
+
+### 7.6 Single session and deletion
+1. Sign in as person 1 on phone A, then as person 1 on laptop B. Phone A immediately ends any call and shows *"Your account was logged in on another device."*
+2. Delete a received message **for me**: it disappears on this device, stays for the other person, and stays gone after a reload and a new login.
+3. Delete your own message **for everyone**: both see "This message was deleted".
+4. Chat header 🗑 → **Delete for everyone**: both conversations become empty, also after a refresh.
+5. Settings → **Clear all chat history → Delete for me**: messages and call history are empty for you only.
+
+### 7.7 Requirement checklist
+
+| # | Requirement | How it is met | Status |
+|---|---|---|---|
+| 1 | PWA install, standalone, Android + desktop, iOS instructions, HTTPS | `manifest.json`, `sw.js`, `pwa.js`, GitHub Pages HTTPS | Implemented, needs device test |
+| 2 | Coded notifications, configurable title and codes, no content in payload, tap = dismiss | `notify-config.js`, `sw.js`, `functions/index.js` (`{k}` only) | Implemented. Background push needs Blaze + deploy |
+| 3 | Delete message / conversation / all; for me / for everyone; confirmation; persistent; authorized | `chat.js`, `calls.js`, `app.js`, rules + tests | Implemented, rules tests written |
+| 4 | Permissions: check state, explain, ask on action, help after denial, never re-prompt | `permissions.js`, `calls.js`, `settings.js` | Implemented |
+| 5 | Audio calling with accept, reject, cancel, end, states, reconnection, private call push | `calls.js`, `webrtc.js`, `notifyIncomingCall` / `notifyMissedCall` | Implemented, with browser limits in §8 |
+| 6 | Earpiece or headphones only | Never routes to the loudspeaker; honest indicator and warning | **Cannot be enforced in a browser**, see §8 |
+| 7 | Separate codes per event, generic text, no call type or name, silent option | `notify-config.js`, Settings | Implemented |
+| 8 | Session-only login, no passwords stored, restore guard, single active session enforced by server | `firebase.js`, `session.js`, rules | Implemented, rules tests written |
+| 9 | Existing stack kept, no frameworks | Firebase + vanilla JS | Done |
+| 10 | Security: HTTPS, auth, authorization, no sensitive payloads or logs | Rules, CSP, functions | Implemented |
+
+The manual tests above need your Firebase project and real devices. They could not be run in the build environment.
 
 ---
 
-## 8. Known limitations
+## 8. Platform limitations (read this)
 
-- **No background or closed-app calls.** A GitHub Pages site has no push server, so incoming calls and notifications **only work while the page is open**. A background tab works on desktop browsers. Mobile browsers usually suspend background tabs within seconds to minutes, and then nothing rings. iOS only allows web notifications for sites added to the Home Screen (iOS 16.4+), and even then only through Web Push, which needs a server. Adding Firebase Cloud Messaging plus a Cloud Function would fix this, but it requires the paid Blaze plan and a backend, which are outside this project's constraints.
-- **Presence is approximate.** Firestore has no "on disconnect" trigger. The app sends a heartbeat every 60 s. If a tab is killed, the other person may see "online" for up to about 2.5 minutes before it switches to "last seen".
-- **Autoplay.** Sound starts only after you have interacted with the page once. If the browser blocks remote audio, a "Tap to enable sound" button appears.
-- **Calls need connectivity on both sides.** There is no ICE-restart renegotiation. After a network change that does not recover within about 12 s, the call ends and you call again.
-- **Audio and video calls are separate.** You cannot upgrade an audio call to video mid-call.
-- **Multiple tabs.** If the same account is open in two tabs or devices, both ring. Answering in one dismisses the other.
-- **No message editing, attachments or group chats.** These were outside the requirements.
-- **Firestore TTL deletion** happens within about 24 h after expiry, not instantly.
-- **Browser support:** current Chrome, Edge, Firefox and Safari 15.4+ (desktop and mobile). HTTPS is required for camera and microphone, and GitHub Pages provides it.
+**Background notifications and calls.** These limits come from the browsers and operating systems, not from this app.
+- **A web app cannot ring like a phone call when it is closed.** A push can only show a normal notification. There is no full-screen incoming-call screen, no ringtone loop, and no answering from the notification. Because you chose "tap = dismiss", you open the app yourself. A call keeps ringing for 40 s, and the app still shows it if you sign in within that time.
+- **Android:** push works for installed apps and Chrome while the app or browser is closed, unless the user force-stops Chrome or battery optimisation is aggressive. Some vendors delay pushes, especially Xiaomi, Oppo, Vivo, Huawei and some Samsung modes. The notification header always shows the app name ("My Offers") or, in a browser tab, the website address. That can't be hidden.
+- **iPhone/iPad:** push works only for apps added to the Home Screen, on iOS 16.4+. iOS may group or delay notifications.
+- **Desktop:** push arrives while the browser is running, even with no tab open. Nothing arrives if the browser is fully closed.
+- **Sound:** "Silent" asks the OS for no sound. Otherwise the OS or browser default sound is used. Web apps can't set a custom notification ringtone, and Android lets the user change it per app.
+- **For reliable ringing calls in the background**, you would need a native Android app using `ConnectionService` / `TelecomManager` (or a self-managed `ConnectionService`) with FCM high-priority data messages and a full-screen-intent notification. A WebView wrapper (for example Capacitor) can reuse this web UI for everything else.
+
+**Earpiece-only call audio.**
+- No web API can select the phone earpiece versus the loudspeaker, or block the loudspeaker. `setSinkId()` only picks among devices the browser lists, and on Android Chrome that is usually just "default".
+- On many Android phones, Chrome plays WebRTC call audio on the **loudspeaker** unless wired or Bluetooth headphones are connected. Headphones, when connected, are normally preferred by the OS.
+- Headphone detection is only possible where the browser exposes device names (mostly desktop). The app therefore never claims audio is private. It shows "Headphones detected" only when the browser reports a headset as the output, and otherwise warns *"May play on loudspeaker — use headphones"*.
+- **Strict earpiece-only** needs a native Android app (a WebView or Capacitor wrapper; a TWA is not enough because it is still Chrome). It would use `AudioManager.setMode(MODE_IN_COMMUNICATION)` with `setCommunicationDevice(TYPE_BUILTIN_EARPIECE)` on Android 12+ (or `setSpeakerphoneOn(false)` on older versions), and switch to `TYPE_WIRED_HEADSET` / `TYPE_BLUETOOTH_SCO` when connected.
+
+**Sessions.**
+- Two logins in the **same second** on two devices get the same `auth_time`, so both stay valid until one of them signs in again. This is a theoretical edge case.
+- Every new browser tab is a new sign-in (session-only storage), and it takes over from the previous tab or device.
+- Browser tab vs installed app: both require the password after being closed. Push keeps working for both, because the token belongs to the device and the session, not to an open page. Closing is not logging out. An explicit **Log out** stops push to that device.
+- "Continue where you left off" can restore session storage. The 10-minute restore guard catches a real browser restart, but a restart within 10 minutes keeps you signed in.
+- Firestore checks rules when a listener starts. A *modified* old client might keep receiving an already-open real-time stream until its connection is re-established. The unmodified app disconnects itself immediately, and every new read or write is rejected. Verify this with the emulator if it matters to you.
+
+**Other.**
+- **Presence is approximate** (60 s heartbeat, about 2.5 min to "last seen").
+- **Autoplay:** sound starts only after one interaction. If remote audio is blocked, "Tap to enable sound" appears.
+- **ICE restart** needs a working path. Without TURN, some network changes still end the call after 30 s.
+- **Audio and video calls are separate.** There is no switching mid-call.
+- **No message editing, attachments or group chats.**
+- **Firestore TTL deletion** happens within about 24 h of expiry.
 
 ---
 
 ## 9. Cost and Firestore usage
 
-The free **Spark** plan quotas (50k reads, 20k writes, 20k deletes per day, 1 GiB storage) are ample for two people. Rough figures while the app is open:
+Firestore quotas: 50k reads, 20k writes and 20k deletes per day free. Cloud Functions on Blaze include 2M invocations per month free. FCM is free. Rough figures while the app is open:
 
 | Activity | Writes | Reads |
 |---|---|---|
-| Presence heartbeat | 1 per minute per open device | about 2 per heartbeat (your own profile and the peer's listener) |
-| Sending a message | 1 + occasional receipt | 1 per listener (both users) |
-| Typing | at most about 1 per 3 s while typing | 1 per change on the peer |
-| A call | 1 create + 2–3 updates + about 10–40 candidates | similar number of reads |
-| App load | 1–2 | up to about 30 messages + 15 calls (cached afterwards) |
+| Presence heartbeat | 1 per minute per open device | about 2 per heartbeat (+1 for the session check) |
+| Sign-in | 2–3 (session, presence, push token) | 2–3 |
+| Sending a message | 1 + occasional receipt | 1 per listener + 1 session check, plus 2 in the push function |
+| A call | 1 create + 2–4 updates + about 10–40 candidates | similar, plus 2 in the push function |
+| App load | 1–2 | up to about 30 messages + 15 calls (memory cache, so every load reads again) |
+| Delete for everyone | 1 delete per message / call | 1 read per document |
 
-A heavy day (8 hours open on two devices, hundreds of messages, a few calls) stays in the low thousands of operations. Leaving the app open 24/7 on several devices increases heartbeat writes: about 1,440 per device per day. TURN relays are billed by their provider, separately from Firebase.
-
-Set a **budget alert** in Google Cloud if you upgrade to Blaze.
+The session check (`get(sessions/{uid})` in the rules) adds about one billed read per request or listener start. Two people stay far inside the free quotas, but set a budget alert anyway (Step 7b). The first functions deploy may store a few cents of container images in Artifact Registry each month.
 
 ---
 
@@ -365,19 +457,18 @@ Set a **budget alert** in Google Cloud if you upgrade to Blaze.
 | Symptom | Fix |
 |---|---|
 | "Setup required" screen | Fill in `FIREBASE_CONFIG` and both `ALLOWED_UIDS` in `js/firebase-config.js`. |
-| "Firebase is not configured" on login | The API key or config is wrong. Copy it again from Project settings. |
-| `auth/unauthorized-domain` | Add `asmandage.github.io` under Authentication → Settings → Authorized domains. |
-| "Email/password sign-in is not enabled" | Enable it under Authentication → Sign-in method. |
-| "Signed in, but the database denied access" | The UIDs in `firestore.rules` do not match, or the rules were not published. |
-| "This account is not authorized" | The UID is missing from `ALLOWED_UIDS`. |
-| "Call history needs a Firestore index" | Create the composite index (Step 7), then wait for it to finish building. |
-| Calls ring but never connect ("TURN relay is needed") | The networks block peer-to-peer. Configure TURN (§4) or test on another network. |
-| No camera or mic prompt, or "requires HTTPS" | Open the `https://` URL. On `http://` LAN addresses browsers block media. `localhost` is allowed. |
-| Remote audio silent on iPhone | Tap "Tap to enable sound". Check the silent switch and volume. |
-| "Permission … denied" | Allow camera/mic in the browser's site settings (padlock icon), then call again. |
-| Changes don't show after uploading | GitHub Pages and the browser cache. Wait a minute and hard-refresh (Ctrl/Cmd+Shift+R). |
-| Blank page | Open DevTools → Console. A 404 on a `.js` file usually means a folder was not uploaded, or `index.html` is not at the repository root. |
-| App Check errors after enforcing | `APP_CHECK_SITE_KEY` is missing or the domain is not registered for the reCAPTCHA key. |
+| "Signed in, but the database denied access" | UIDs in `firestore.rules` don't match, or the **new** rules (with `sessions/`) were not published. |
+| Immediately "logged in on another device" | Another device or tab signed in later, so sign in again here. If it happens without any other login, check the device clock and that the rules were published together with the site. |
+| No **Install App** button | Use HTTPS and Chrome/Edge. The app may already be installed, or Chrome may need a few seconds and some interaction. On iPhone, use Safari. |
+| Settings says background push "not set up" | `FCM_VAPID_KEY` is empty, the browser lacks push support, or an API-key restriction blocks FCM (Step 7c). |
+| Push enabled but nothing arrives when closed | Functions not deployed or wrong `REGION` (check Firebase → Functions → Logs), app notifications disabled in Android settings, or battery optimisation. |
+| `auth/unauthorized-domain` | Add your `github.io` domain under Authentication → Authorized domains. |
+| "Call history needs a Firestore index" | Create the composite index (Step 7). |
+| Calls ring but never connect | Configure TURN (§4) or test on another network. |
+| No camera/mic prompt, or "requires HTTPS" | Use the `https://` URL. `localhost` is allowed. |
+| "… blocked" dialog | Follow the steps shown. The browser won't ask again until you change the site setting. |
+| Changes don't show after uploading | Wait a minute and reload twice (the service worker updates in the background). |
+| Blank page | Open DevTools → Console. A 404 usually means a file or folder was not uploaded. |
 
 ### Local testing (optional)
-ES modules do not load from `file://`. Serve the folder over HTTP instead, for example with `npx serve .` or `python -m http.server 8080`, and open `http://localhost:8080`. Add `localhost` to Firebase's authorized domains (it is there by default).
+ES modules and service workers don't work from `file://`. Serve the folder with `npx serve .` or `python -m http.server 8080` and open `http://localhost:8080` (localhost counts as secure).
