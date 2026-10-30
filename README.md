@@ -90,6 +90,7 @@ Deletions are stored in Firestore, so they survive refresh, logout and logging i
 - If access is blocked, the app never re-triggers the browser prompt. It shows platform-specific steps (Android, iPhone, desktop) to re-enable access.
 
 **Sign-in and sessions**
+- **Wrong login → decoy page.** A wrong email or password (or a valid account that is not one of the two) opens a generic "My Offers" deals page instead of an error. It names no real company, collects nothing and links nowhere. Network and "too many attempts" errors still show normally. To return to the login, reload the page or tap the "My Offers" title 5 times. It is camouflage only: Firebase still rate-limits attempts and the rules still protect the data.
 - **Session-only sign-in.** The password is required again after the browser tab, the browser or the installed app has been closed. The sign-in token lives in sessionStorage, never in localStorage, and passwords are never stored. If a browser restores a closed session ("continue where you left off"), the app signs it out unless it was in use within the last 10 minutes.
 - **One active session per account, enforced by the server.** A new login on another device takes over immediately. The rules reject every request from the old sign-in, even with an unexpired token. The old device is notified in real time, ends any call, drops all chat data from memory and shows *"Your account was logged in on another device."*
 - Chat data is cached **in memory only**, so nothing is left on the device after closing or signing out.

@@ -9,6 +9,7 @@ export function showScreen(name) {
   $('boot-screen').hidden = name !== 'boot';
   $('login-screen').hidden = name !== 'login';
   $('app-screen').hidden = name !== 'app';
+  $('decoy-screen').hidden = name !== 'decoy';
 }
 
 export function setBootMessage(text) {

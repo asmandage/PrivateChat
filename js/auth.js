@@ -14,6 +14,13 @@ import {
 import { auth } from './firebase.js';
 import { ALLOWED_UIDS } from './firebase-config.js';
 import { $, friendlyError, setButtonLoading, toast } from './ui.js';
+import { showDecoy } from './decoy.js';
+
+// Errors that mean "wrong email or password" (network/rate-limit errors still show text).
+const WRONG_CREDENTIALS = new Set([
+  'auth/invalid-credential', 'auth/invalid-login-credentials', 'auth/wrong-password',
+  'auth/user-not-found', 'auth/user-disabled',
+]);
 
 export const isAllowedUid = (uid) => ALLOWED_UIDS.includes(uid);
 
@@ -59,12 +66,19 @@ export function initLoginForm() {
       const cred = await signInWithEmailAndPassword(auth, email, password);
       if (!isAllowedUid(cred.user.uid)) {
         await signOut(auth);
-        showLoginError('This account is not authorized to use this app.');
+        $('login-password').value = '';
+        showDecoy();
         return;
       }
       $('login-password').value = '';
     } catch (err) {
       signedInHere = false;
+      if (WRONG_CREDENTIALS.has(err?.code)) {
+        // Wrong email/password: show the decoy offers page instead of an error.
+        $('login-password').value = '';
+        showDecoy();
+        return;
+      }
       showLoginError(friendlyError(err, 'Sign-in failed. Please try again.'));
     } finally {
       submitting = false;
