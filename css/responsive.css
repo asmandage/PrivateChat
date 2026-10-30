@@ -56,3 +56,11 @@
 @media (max-width: 820px) {
   .msg.in .msg-delete { left: auto; right: -36px; }
 }
+
+/* Small phones: four header actions (call, video, delete, settings) leave room for the name. */
+@media (max-width: 400px) {
+  .chat-header { gap: 6px; padding-right: 6px; }
+  .chat-header .header-actions { gap: 0; }
+  .chat-header .header-actions .icon-btn { width: 36px; height: 36px; }
+  .chat-header .header-actions .icon-btn svg { width: 20px; height: 20px; }
+}

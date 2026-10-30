@@ -232,6 +232,12 @@ export class PeerSession {
     return { type: answer.type, sdp: answer.sdp };
   }
 
+  /** Abandons a restart offer that was never answered, back to the "stable" state. */
+  async rollbackOffer() {
+    if (this.closed || this.pc.signalingState !== 'have-local-offer') return;
+    await this.pc.setLocalDescription({ type: 'rollback' });
+  }
+
   async applyRestartAnswer(answer) {
     if (this.closed || this.pc.signalingState !== 'have-local-offer') return;
     await this.pc.setRemoteDescription(new RTCSessionDescription(answer));

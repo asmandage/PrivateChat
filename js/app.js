@@ -86,7 +86,17 @@ async function main() {
 async function startSession(user) {
   teardownSession();
   showScreen('boot');
-  setBootMessage('Loading your conversation…');
+  // Starting a session needs the server; offline it waits until the connection is back.
+  const bootText = () => setBootMessage(navigator.onLine
+    ? 'Loading your conversation…'
+    : 'You are offline. Waiting for an internet connection…');
+  bootText();
+  window.addEventListener('online', bootText);
+  window.addEventListener('offline', bootText);
+  const stopBootText = () => {
+    window.removeEventListener('online', bootText);
+    window.removeEventListener('offline', bootText);
+  };
 
   const peerUid = getPeerUid(user.uid);
   const s = { user, authTime: 0, peerUid, myData: null, peerData: null, wipe: {}, unsubs: [], timers: [] };
@@ -115,6 +125,8 @@ async function startSession(user) {
     showScreen('login');
     showLoginError(msg);
     return;
+  } finally {
+    stopBootText();
   }
   if (session !== s) return;
 
