@@ -38,7 +38,7 @@ import {
   $, icon, toast, choiceDialog, friendlyError,
   formatTime, formatDayLabel, formatListTime, dayKey,
 } from './ui.js';
-import { notifyTyping, stopTyping, markRead, markDelivered, serverNow, stampUserFields } from './presence.js';
+import { notifyTyping, stopTyping, markRead, markDelivered, serverNow, stampUserFields, stampPrivateMarkers } from './presence.js';
 import { playMessageSound, notifyPrivate, setUnread, closeNotification } from './notifications.js';
 
 const PAGE_SIZE = 30;
@@ -72,6 +72,7 @@ let generation = 0;          // invalidates async work from a previous session /
 let clearedAt = null;        // Date: everything up to here is deleted for me
 let hiddenIds = new Set();   // single messages deleted for me
 let unsubHidden = null;
+let unsubDeleted = null;
 let deleting = false;
 
 /* ======================================================================
@@ -88,13 +89,17 @@ export function initChat({ myUid, peerUid, getPeerName, myLastReadAt, myClearedA
   showState('loading');
   // Load the "deleted for me" list first so hidden messages never flash on screen.
   subscribeHidden(() => subscribeLive());
+  subscribeDeletions();
 }
 
 export function destroyChat() {
+  generation++;   // late callbacks of this session's listeners are ignored
   unsubLive?.();
   unsubLive = null;
   unsubHidden?.();
   unsubHidden = null;
+  unsubDeleted?.();
+  unsubDeleted = null;
   hiddenIds = new Set();
   clearedAt = null;
   olderObserver?.disconnect();
@@ -138,7 +143,33 @@ function subscribeHidden(onReady) {
   });
 }
 
+/**
+ * "Delete for everyone" on a single message blanks it. The live listener only covers
+ * the newest PAGE_SIZE messages, so this second listener catches blanking of any
+ * loaded message (older pages too) from the moment the session started.
+ */
+function subscribeDeletions() {
+  const gen = generation;
+  const since = Timestamp.fromMillis(serverNow() - 60_000);   // margin for clock skew
+  unsubDeleted = onSnapshot(query(messagesCol(), where('deletedAt', '>', since)), (snap) => {
+    if (gen !== generation) return;
+    let changed = false;
+    for (const change of snap.docChanges()) {
+      const msg = messages.get(change.doc.id);
+      if (change.type === 'removed' || !msg || msg.deleted) continue;
+      msg.deleted = true;
+      msg.text = '';
+      updateNode(msg);
+      changed = true;
+    }
+    if (changed) { updateSidebarPreview(); refreshUnreadAndReceipts(); }
+  }, (err) => console.error('Deleted-messages listener error:', err?.code));
+}
+
+const createdMillis = (docSnap) => docSnap.data({ serverTimestamps: 'estimate' })?.createdAt?.toMillis?.() ?? 0;
+
 function subscribeLive() {
+  unsubLive?.();   // never keep two live listeners (e.g. a reload during start-up)
   const gen = generation;
   const q = messagesQuery(limit(PAGE_SIZE));
   unsubLive = onSnapshot(q, { includeMetadataChanges: true }, (snap) => {
@@ -146,18 +177,26 @@ function subscribeLive() {
     const wasNearBottom = isNearBottom();
     let incoming = [];
     let ownAdded = false;
+    // Newest server-confirmed message known before this snapshot. Older documents
+    // entering the window are ones sliding back in after a deletion, not new arrivals.
+    let newestBefore = 0;
+    for (const m of messages.values()) if (!m.pending && !m.failed) newestBefore = Math.max(newestBefore, m.createdAt.getTime());
+    const oldestInWindow = snap.docs.length ? createdMillis(snap.docs[snap.docs.length - 1]) : Infinity;
 
     for (const change of snap.docChanges({ includeMetadataChanges: true })) {
       if (change.type === 'removed') {
-        // In a full window a removal is usually a message sliding out of it, which
-        // stays in memory. In a partly filled window it can only be a real deletion.
-        if (snap.size < PAGE_SIZE) messages.delete(change.doc.id);
+        const local = messages.get(change.doc.id);
+        // A send the server rejected was never saved: keep it so it can be retried.
+        if (local && (local.pending || local.failed)) continue;
+        // Sliding out of the newest-30 window means being older than everything still
+        // in it; such messages stay in memory. Anything else was really deleted.
+        if (snap.size < PAGE_SIZE || createdMillis(change.doc) >= oldestInWindow) messages.delete(change.doc.id);
         continue;
       }
       const msg = toMessage(change.doc);
       const existed = messages.has(msg.id);
       messages.set(msg.id, msg);
-      if (!existed && change.type === 'added') {
+      if (!existed && change.type === 'added' && (msg.pending || msg.createdAt.getTime() > newestBefore)) {
         if (msg.senderId === ctx.myUid) ownAdded = true;
         else incoming.push(msg);
       }
@@ -653,6 +692,14 @@ async function deleteMessage(id) {
   } else if (choice === 'everyone') {
     try {
       await updateDoc(doc(messagesCol(), id), { text: '', deleted: true, deletedAt: serverTimestamp() });
+      // Older pages have no live listener: update the bubble here as well.
+      const m = messages.get(id);
+      if (m && !m.deleted) {
+        m.deleted = true;
+        m.text = '';
+        updateNode(m);
+        updateSidebarPreview();
+      }
     } catch (err) {
       toast(friendlyError(err, 'Could not delete the message.'), { type: 'error' });
     }
@@ -714,7 +761,7 @@ async function deleteAll(ref) {
 /** "Delete conversation for me". extraFields lets "clear all" stamp callsClearedAt too. */
 export async function clearMessagesForMe(extraFields = []) {
   const uid = ctx.myUid;
-  await stampUserFields(['clearedAt', ...extraFields]);
+  await stampPrivateMarkers(['clearedAt', ...extraFields]);
   // clearedAt now covers every single-message marker, so they can go.
   await deleteAll(collection(db, 'users', uid, 'hiddenMessages'));
 }

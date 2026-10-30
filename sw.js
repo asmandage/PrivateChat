@@ -3,9 +3,9 @@
  * push notifications.
  *
  * Privacy:
- *  - It never sees or caches chat data. Firestore, Firebase Auth and the Firebase SDK
- *    are cross-origin and pass straight through; only this site's own static files
- *    (HTML/CSS/JS/icons) are cached.
+ *  - It never sees or caches chat data. Firestore and Firebase Auth traffic passes
+ *    straight through; only this site's own static files (HTML/CSS/JS/icons) and the
+ *    version-pinned Firebase SDK files are cached.
  *  - A push carries only an event kind ({k:'m'|'a'|'v'|'mc'}). It is shown with the
  *    coded title/text configured on this device — never names, message text or call
  *    details — and nothing about it is logged.
@@ -13,8 +13,11 @@
  */
 'use strict';
 
-const VERSION = '2.0.0';
+const VERSION = '2.1.0';
 const SHELL_CACHE = `shell-${VERSION}`;
+// The SDK URLs contain the exact version (10.12.2) and never change, so cache-first is safe.
+const SDK_CACHE = 'firebase-sdk-10.12.2';
+const SDK_PREFIX = 'https://www.gstatic.com/firebasejs/10.12.2/';
 const SHELL = [
   './', 'index.html', 'manifest.json',
   'css/style.css', 'css/chat.css', 'css/calls.css', 'css/responsive.css',
@@ -36,7 +39,9 @@ self.addEventListener('install', (event) => {
 self.addEventListener('activate', (event) => {
   event.waitUntil(
     caches.keys()
-      .then((keys) => Promise.all(keys.filter((k) => k.startsWith('shell-') && k !== SHELL_CACHE).map((k) => caches.delete(k))))
+      .then((keys) => Promise.all(keys
+        .filter((k) => (k.startsWith('shell-') && k !== SHELL_CACHE) || (k.startsWith('firebase-sdk-') && k !== SDK_CACHE))
+        .map((k) => caches.delete(k))))
       .then(() => self.clients.claim()),
   );
 });
@@ -46,6 +51,17 @@ self.addEventListener('activate', (event) => {
 self.addEventListener('fetch', (event) => {
   const req = event.request;
   if (req.method !== 'GET') return;
+  // Firebase SDK modules: from cache when available, so the app can start offline.
+  if (req.url.startsWith(SDK_PREFIX)) {
+    event.respondWith(caches.open(SDK_CACHE).then(async (cache) => {
+      const hit = await cache.match(req);
+      if (hit) return hit;
+      const res = await fetch(req);
+      if (res.ok) cache.put(req, res.clone()).catch(() => {});
+      return res;
+    }));
+    return;
+  }
   const url = new URL(req.url);
   if (url.origin !== self.location.origin) return;
   event.respondWith(
@@ -65,7 +81,7 @@ self.addEventListener('fetch', (event) => {
 /* ---------- Coded notification config (keep in sync with js/notify-config.js) ---------- */
 
 const KINDS = ['m', 'a', 'v', 'mc'];
-const TAGS = { m: 'pc-m', a: 'pc-c', v: 'pc-c', mc: 'pc-c' };
+const TAGS = { m: 'pc-m', a: 'pc-c', v: 'pc-c', mc: 'pc-mc' };
 const DEFAULTS = {
   title: 'Special Offer Update',
   body: 'Your code {code} is available',
@@ -104,18 +120,30 @@ function codedText(cfg, kind) {
   };
 }
 
+// Safari (iPhone, iPad, Mac) withdraws push permission from sites whose pushes do not
+// show a notification, so there every push is shown, even while the app is on screen.
+const MUST_SHOW_EVERY_PUSH = /AppleWebKit/.test(self.navigator.userAgent)
+  && !/Android|Chrome\/|Chromium|Edg\//.test(self.navigator.userAgent);
+
 async function showCoded(kind) {
   // If the app is on screen it shows the event itself; no notification needed.
-  const windows = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
-  if (windows.some((w) => w.visibilityState === 'visible')) return;
+  if (!MUST_SHOW_EVERY_PUSH) {
+    const windows = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+    if (windows.some((w) => w.visibilityState === 'visible')) return;
+  }
   const { title, body, silent } = codedText(await readConfig(), kind);
   await self.registration.showNotification(title, {
     body,
     tag: TAGS[kind],
+    renotify: true,   // a newer event replacing an older notification still alerts
     icon: 'assets/icons/icon-192.png',
     badge: 'assets/icons/badge-96.png',
     silent,
   });
+  // The call is over: the missed-call notification replaces the incoming-call one.
+  if (kind === 'mc') {
+    (await self.registration.getNotifications({ tag: TAGS.a })).forEach((n) => n.close());
+  }
 }
 
 self.addEventListener('push', (event) => {

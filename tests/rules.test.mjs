@@ -163,6 +163,27 @@ describe('users', () => {
   });
 });
 
+describe('delete for me (private markers)', () => {
+  const markers = (db, owner = A, id = 'markers') => doc(db, 'users', owner, 'private', id);
+
+  it('owner sets and reads clearedAt / callsClearedAt', async () => {
+    await assertSucceeds(setDoc(markers(as(A)), { clearedAt: serverTimestamp() }, { merge: true }));
+    await assertSucceeds(setDoc(markers(as(A)), { callsClearedAt: serverTimestamp() }, { merge: true }));
+    await assertSucceeds(getDoc(markers(as(A))));
+  });
+  it('the other member cannot see or change when history was cleared', async () => {
+    await seed(['users', A, 'private', 'markers'], { clearedAt: Timestamp.now() });
+    await assertFails(getDoc(markers(as(B))));
+    await assertFails(setDoc(markers(as(B)), { clearedAt: serverTimestamp() }));
+  });
+  it('rejects other documents, extra fields and future times', async () => {
+    await assertFails(setDoc(markers(as(A), A, 'other'), { clearedAt: serverTimestamp() }));
+    await assertFails(setDoc(markers(as(A)), { clearedAt: serverTimestamp(), note: 'x' }));
+    await assertFails(setDoc(markers(as(A)), { clearedAt: Timestamp.fromMillis(Date.now() + 86400_000) }));
+    await assertFails(setDoc(markers(as(A, T - 60)), { clearedAt: serverTimestamp() }));   // superseded sign-in
+  });
+});
+
 describe('delete for me (hiddenMessages)', () => {
   const hidden = (db, owner, id = 'm1') => doc(db, 'users', owner, 'hiddenMessages', id);
 

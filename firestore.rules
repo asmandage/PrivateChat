@@ -102,6 +102,18 @@ service cloud.firestore {
       allow update: if isActive() && userId == me() && validUser(incoming());
       allow delete: if false;
 
+      // "Deleted for me" markers (clearedAt / callsClearedAt), private to their owner so
+      // the other person cannot see when history was cleared.
+      match /private/{docId} {
+        allow read: if isActive() && userId == me();
+        allow create, update: if isActive() && userId == me()
+          && docId == 'markers'
+          && incoming().keys().hasOnly(['clearedAt', 'callsClearedAt'])
+          && optPastTimestamp(incoming(), 'clearedAt')
+          && optPastTimestamp(incoming(), 'callsClearedAt');
+        allow delete: if false;
+      }
+
       // Single messages deleted "for me". Private to their owner.
       match /hiddenMessages/{messageId} {
         allow read, delete: if isActive() && userId == me();

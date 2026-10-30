@@ -59,7 +59,8 @@ export async function startPresence(user) {
     await updateDoc(ref, { state: 'online', lastActive: serverTimestamp(), typing: false });
   }
   const t1 = Date.now();
-  estimateClockOffset(ref, (t0 + t1) / 2);
+  // Awaited: stale-call checks right after sign-in must use the corrected clock.
+  await estimateClockOffset(ref, (t0 + t1) / 2);
 
   clearInterval(heartbeatTimer);
   heartbeatTimer = setInterval(() => {
@@ -107,11 +108,11 @@ function onPageHide() {
   updateDoc(userRef(myUid), { state: 'offline', lastActive: serverTimestamp(), typing: false }).catch(() => {});
 }
 
-export async function stopPresence() {
+export async function stopPresence({ markOffline = true } = {}) {
   clearInterval(heartbeatTimer);
   clearTimeout(typingIdleTimer);
   heartbeatTimer = null;
-  if (myUid) {
+  if (myUid && markOffline) {
     await quiet(updateDoc(userRef(myUid), { state: 'offline', lastActive: serverTimestamp(), typing: false }));
   }
   myUid = null;
@@ -173,11 +174,32 @@ export async function updateDisplayName(name) {
 }
 
 /**
- * Sets history markers on my profile to the server time: clearedAt / callsClearedAt
- * ("deleted for me" up to now) or wipedAt (I erased the conversation for everyone).
+ * Sets markers on my (public) profile to the server time. Only used for wipedAt
+ * ("I erased the conversation for everyone"), which the other app must see.
  */
 export async function stampUserFields(fields) {
   await updateDoc(userRef(myUid), Object.fromEntries(fields.map((f) => [f, serverTimestamp()])));
+}
+
+/*
+ * "Deleted for me" markers (clearedAt / callsClearedAt) live in an owner-only document,
+ * so the other person cannot see when I cleared my history. Older versions stored them
+ * on the public profile; app.js still reads those as a fallback.
+ */
+const markersRef = (uid) => doc(db, 'users', uid, 'private', 'markers');
+
+export async function stampPrivateMarkers(fields) {
+  await setDoc(markersRef(myUid), Object.fromEntries(fields.map((f) => [f, serverTimestamp()])), { merge: true });
+}
+
+export async function getPrivateMarkers(uid) {
+  const snap = await getDoc(markersRef(uid));
+  return snap.exists() ? snap.data() : null;
+}
+
+export function watchPrivateMarkers(uid, callback) {
+  return onSnapshot(markersRef(uid), (snap) => callback(snap.exists() ? snap.data({ serverTimestamps: 'estimate' }) : null),
+    (err) => console.error('Markers listener error:', err?.code));
 }
 
 export function watchUser(uid, callback, onError) {

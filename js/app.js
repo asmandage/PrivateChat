@@ -6,10 +6,11 @@
 import { isConfigured, initAppCheck } from './firebase.js';
 import { ALLOWED_UIDS, APP_VERSION } from './firebase-config.js';
 import {
-  initLoginForm, watchAuth, logout, getPeerUid, showLoginError, wasSignedInHere,
+  initLoginForm, watchAuth, logout, getPeerUid, showLoginError, wasSignedInHere, currentUser,
 } from './auth.js';
 import {
   startPresence, stopPresence, watchUser, describePresence, updateDisplayName,
+  getPrivateMarkers, watchPrivateMarkers,
 } from './presence.js';
 import {
   initChat, destroyChat, setPeerMarkers, setPeerTyping, setSidebarTyping,
@@ -35,6 +36,7 @@ import {
 } from './ui.js';
 
 const PRESENCE_REFRESH_MS = 15_000;
+const TRANSIENT_ERRORS = new Set(['unavailable', 'deadline-exceeded', 'auth/network-request-failed']);
 const mobileQuery = window.matchMedia('(max-width: 820px)');
 
 let session = null;   // { user, authTime, peerUid, myData, peerData, wipe, unsubs: [], timers: [] }
@@ -99,7 +101,7 @@ async function startSession(user) {
   };
 
   const peerUid = getPeerUid(user.uid);
-  const s = { user, authTime: 0, peerUid, myData: null, peerData: null, wipe: {}, unsubs: [], timers: [] };
+  const s = { user, authTime: 0, peerUid, myData: null, peerData: null, markers: {}, wipe: {}, unsubs: [], timers: [] };
   session = s;
 
   let previous;
@@ -112,10 +114,19 @@ async function startSession(user) {
     if (session !== s) return;
     step = 'profile';
     previous = await startPresence(user);
+    s.markers = { pub: previous, priv: await getPrivateMarkers(user.uid) };
   } catch (err) {
     if (session !== s) return;
     if (err instanceof SessionSupersededError) { endSuperseded(s); return; }
     session = null;
+    // A network hiccup must not sign the user out: keep the sign-in and try again.
+    if (TRANSIENT_ERRORS.has(err?.code) || !navigator.onLine) {
+      setBootMessage('Connection problem. Retrying…');
+      setTimeout(() => {
+        if (!session && currentUser()?.uid === user.uid) startSession(user);
+      }, 3000);
+      return;
+    }
     const msg = err?.code !== 'permission-denied'
       ? friendlyError(err, 'Could not connect to the database.')
       : step === 'session'
@@ -137,10 +148,13 @@ async function startSession(user) {
   s.unsubs.push(watchUser(user.uid, (data) => {
     s.myData = data;
     renderMe();
-    // "Delete for me" markers may have been set here or by an earlier session.
-    setClearedAt(toDate(data?.clearedAt));
-    setCallsClearedAt(toDate(data?.callsClearedAt));
+    s.markers.pub = data;   // legacy location of the "deleted for me" markers
+    applyMarkers(s);
     noteWipe(s, 'me', data);
+  }));
+  s.unsubs.push(watchPrivateMarkers(user.uid, (data) => {
+    s.markers.priv = data;
+    applyMarkers(s);
   }));
   s.unsubs.push(watchUser(peerUid, (data) => {
     s.peerData = data;
@@ -168,11 +182,11 @@ async function startSession(user) {
 
   initChat({
     myUid: user.uid, peerUid, getPeerName: peerName,
-    myLastReadAt: toDate(previous?.lastReadAt), myClearedAt: toDate(previous?.clearedAt),
+    myLastReadAt: toDate(previous?.lastReadAt), myClearedAt: latestMarker(s, 'clearedAt'),
   });
   initCalls({
     myUid: user.uid, peerUid, getPeerName: peerName,
-    previousLastActive: previous?.lastActive || null, myCallsClearedAt: toDate(previous?.callsClearedAt),
+    previousLastActive: previous?.lastActive || null, myCallsClearedAt: latestMarker(s, 'callsClearedAt'),
   });
 
   // Refresh this device's push registration under the new session (no prompt here).
@@ -195,6 +209,10 @@ function teardownSession() {
   session = null;
   s.unsubs.forEach((u) => { try { u(); } catch { /* ignore */ } });
   s.timers.forEach(clearInterval);
+  // Stop the heartbeat and the "in use" marker too: the sign-in may have ended without
+  // a reload (e.g. revoked after a password reset). Logout marks offline itself.
+  stopPresence({ markOffline: false });
+  stopAliveMarker();
   destroyCalls();
   destroyChat();
   resetNotifications();
@@ -275,6 +293,17 @@ function pushStatus() {
 
 /* ---------- History deletion ---------- */
 
+/** Newest "deleted for me" marker from the private document or the legacy profile field. */
+function latestMarker(s, field) {
+  const dates = [toDate(s.markers?.priv?.[field]), toDate(s.markers?.pub?.[field])].filter(Boolean);
+  return dates.length ? new Date(Math.max(...dates.map((d) => d.getTime()))) : null;
+}
+
+function applyMarkers(s) {
+  setClearedAt(latestMarker(s, 'clearedAt'));
+  setCallsClearedAt(latestMarker(s, 'callsClearedAt'));
+}
+
 /** A "delete for everyone" by either person: reload the conversation view. */
 function noteWipe(s, who, data) {
   const t = data?.wipedAt?.toMillis?.() ?? 0;
@@ -297,8 +326,9 @@ async function handleClearHistory() {
     await runDeletion(() => clearMessagesForMe(['callsClearedAt']), 'Chat history deleted for you.');
   } else if (choice === 'everyone') {
     await runDeletion(async () => {
-      await eraseCallHistory();
+      // Messages first: if erasing call history fails, the messages are still gone.
       await eraseMessagesForEveryone();
+      await eraseCallHistory();
     }, 'Chat history deleted for everyone.');
   }
 }

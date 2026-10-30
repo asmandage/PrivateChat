@@ -31,6 +31,7 @@ import {
   setDoc,
   updateDoc,
   deleteDoc,
+  getDoc,
   getDocs,
   writeBatch,
   query,
@@ -72,6 +73,7 @@ let uiBound = false;
 let wakeLock = null;
 let preparingCall = false;             // permission explanation is open for an outgoing call
 let callsClearedAt = null;             // Date: call history up to here is deleted for me
+let deferredIncoming = null;           // peer's call we ignored after winning a glare tie-break
 
 const isActive = (c) => c !== null && active === c;
 
@@ -117,6 +119,7 @@ export function destroyCalls() {
   unsubIncoming?.();
   unsubHistory?.();
   unsubIncoming = unsubHistory = null;
+  deferredIncoming = null;
   ctx = null;
   $('call-history').replaceChildren();
 }
@@ -195,12 +198,12 @@ export async function startCall(type) {
 
     c.timers.ring = setTimeout(() => {
       if (!isActive(c) || c.remoteStatus !== 'ringing') return;
-      updateCall(c, { status: 'missed', endedAt: serverTimestamp(), endReason: 'no-answer' });
+      endRinging(c, { status: 'missed', endedAt: serverTimestamp(), endReason: 'no-answer' });
       endLocal(c, `${ctx.getPeerName()} didn’t answer.`);
     }, RING_TIMEOUT_MS);
   } catch (err) {
     if (!isActive(c)) return;
-    if (c.remoteStatus === 'ringing') updateCall(c, { status: 'cancelled', endedAt: serverTimestamp(), endReason: 'error' });
+    if (c.remoteStatus === 'ringing') endRinging(c, { status: 'cancelled', endedAt: serverTimestamp(), endReason: 'error' });
     const msg = err instanceof MediaAccessError ? err.message : friendlyError(err, 'Could not start the call.');
     endLocal(c, msg, 'error');
     if (isPermissionDenial(err)) showPermissionHelp(type === 'video' ? ['microphone', 'camera'] : ['microphone']);
@@ -242,6 +245,8 @@ async function handleIncomingDoc(snap) {
     const glare = active.role === 'caller' && (active.status === 'starting' || active.status === 'ringing');
     if (glare && ctx.myUid < ctx.peerUid) {
       // We win the tie-break: keep our call. The peer cancels theirs on their side.
+      // Remember their call in case ours fails before it reaches them (endLocal).
+      deferredIncoming = snap.ref;
       return;
     }
     if (glare) {
@@ -397,7 +402,11 @@ function watchCallDoc(c) {
           .then((answer) => (isActive(c)
             ? updateDoc(c.ref, { restartAnswerN: n, restartAnswer: answer, updatedAt: serverTimestamp() })
             : null))
-          .catch((err) => console.debug('ICE restart answer skipped', err?.code || err?.name));
+          .catch((err) => {
+            // Allow this offer to be handled again if the caller re-sends it.
+            if (c.restartHandled === n) c.restartHandled = n - 1;
+            console.debug('ICE restart answer skipped', err?.code || err?.name);
+          });
       } else if (c.role === 'caller' && c.restartPending && data.restartAnswer && data.restartAnswerN === c.restartN) {
         c.restartPending = false;
         clearTimer(c, 'restartAnswer');
@@ -418,6 +427,9 @@ function watchCallDoc(c) {
         if (c.role === 'callee' && c.status === 'ringing') {
           endLocal(c, null);
           if (data.endReason !== 'collision') announceMissed(c);
+        } else if (c.role === 'callee' && prev === 'ringing') {
+          // Cancelled while we were still accepting (e.g. the camera prompt was open).
+          endLocal(c, `${name} ended the call before it connected.`);
         } else if (c.role === 'caller' && prev === 'ringing') {
           endLocal(c, `${name} didn’t answer.`);
         }
@@ -575,7 +587,7 @@ function onConnectionState(c, state) {
       c.connectedAt = Date.now();
       c.status = 'connected';
       startTimer(c);
-      requestWakeLock();
+      requestWakeLock(c);
     }
     setCallStatus(c, 'Connected');
     // Sync our current mic/camera state once the data channel is likely open.
@@ -614,6 +626,22 @@ function updateCall(c, fields) {
   });
 }
 
+/**
+ * Caller ends a call that is still ringing (cancel / no answer / error). If the callee
+ * accepted at that same moment, the rules refuse ringing → cancelled|missed; the call
+ * is then ended as an accepted call, so the callee is not left on "Connecting…".
+ */
+function endRinging(c, fields) {
+  const uid = ctx?.myUid;
+  return updateDoc(c.ref, { ...fields, updatedAt: serverTimestamp() }).catch((err) => {
+    if (err?.code !== 'permission-denied' || !uid) return;
+    return updateDoc(c.ref, {
+      status: 'ended', endedAt: serverTimestamp(), endedBy: uid,
+      endReason: fields.endReason || 'cancelled', updatedAt: serverTimestamp(),
+    }).catch((e) => console.debug('Call update skipped', e?.code));
+  });
+}
+
 function failCall(c, message) {
   if (!isActive(c)) return;
   if (c.remoteStatus === 'accepted') {
@@ -630,9 +658,8 @@ export function hangUp() {
   if (c.remoteStatus === 'ringing') {
     // Caller cancels; a callee who is still mid-accept declines instead (the rules
     // make whichever write lands second fail, so the doc always ends consistent).
-    updateCall(c, c.role === 'caller'
-      ? { status: 'cancelled', endedAt: serverTimestamp(), endReason: 'cancelled' }
-      : { status: 'rejected', endedAt: serverTimestamp(), endReason: 'declined' });
+    if (c.role === 'caller') endRinging(c, { status: 'cancelled', endedAt: serverTimestamp(), endReason: 'cancelled' });
+    else updateCall(c, { status: 'rejected', endedAt: serverTimestamp(), endReason: 'declined' });
   } else if (c.remoteStatus === 'accepted') {
     c.peer?.sendControl({ type: 'hangup' });
     updateCall(c, { status: 'ended', endedAt: serverTimestamp(), endedBy: ctx.myUid, endReason: 'hangup' });
@@ -666,6 +693,16 @@ function endLocal(c, message, toastType = 'info') {
   // Best-effort cleanup of our own ICE candidate docs (TTL policy is the backstop).
   const written = c.writtenCandidates.splice(0);
   if (written.length) setTimeout(() => written.forEach((ref) => deleteDoc(ref).catch(() => {})), 2000);
+
+  // We won a glare tie-break but our call ended: if the peer's call is still ringing
+  // (they never saw ours), show it now instead of letting it ring into nothing.
+  const deferred = deferredIncoming;
+  deferredIncoming = null;
+  if (deferred && c.role === 'caller' && ctx) {
+    getDoc(deferred)
+      .then((snap) => { if (ctx && !active && snap.exists() && snap.data().status === 'ringing') handleIncomingDoc(snap); })
+      .catch(() => {});
+  }
 }
 
 /* ======================================================================
@@ -798,8 +835,12 @@ function startTimer(c) {
   c.timers.clock = setInterval(tick, 1000);
 }
 
-async function requestWakeLock() {
-  try { wakeLock = await navigator.wakeLock?.request('screen'); } catch { wakeLock = null; }
+async function requestWakeLock(c) {
+  let lock = null;
+  try { lock = await navigator.wakeLock?.request('screen'); } catch { return; }
+  // The call may have ended while the request was pending: don't keep the screen on.
+  if (!isActive(c)) { lock?.release().catch(() => {}); return; }
+  wakeLock = lock;
 }
 function releaseWakeLock() {
   wakeLock?.release().catch(() => {});
@@ -944,7 +985,9 @@ export function setCallsClearedAt(date) {
  */
 export async function eraseCallHistory() {
   const snap = await getDocs(query(collection(db, 'calls'), where('participants', 'array-contains', ctx.myUid)));
-  const dayAgo = Date.now() - 86400_000;
+  // Server-corrected time plus an hour of margin: a borderline call the rules would
+  // still refuse must not make the whole batch fail.
+  const dayAgo = serverNow() - 86400_000 - 3600_000;
   const erasable = snap.docs.filter((s) => {
     const d = s.data();
     return s.id !== active?.id
