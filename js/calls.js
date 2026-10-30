@@ -58,6 +58,7 @@ const DISCONNECT_GRACE_MS = 12_000;    // before first connect: brief blips ofte
 const RECONNECT_GRACE_MS = 30_000;     // after a drop mid-call: time allowed for ICE restarts
 const RESTART_AFTER_MS = 3_000;        // wait this long in "disconnected" before restarting ICE
 const MAX_RESTARTS = 5;
+const RESTART_ANSWER_TIMEOUT_MS = 8_000;   // give up waiting for a restart answer and retry
 const MAX_CANDIDATES = 100;            // matches the ^[0-9]{1,2}$ id rule
 const CANDIDATE_TTL_MS = 24 * 3600_000;
 const DELETE_BATCH = 20;            // rules allow at most 20 document lookups per batch
@@ -399,6 +400,7 @@ function watchCallDoc(c) {
           .catch((err) => console.debug('ICE restart answer skipped', err?.code || err?.name));
       } else if (c.role === 'caller' && c.restartPending && data.restartAnswer && data.restartAnswerN === c.restartN) {
         c.restartPending = false;
+        clearTimer(c, 'restartAnswer');
         c.peer.applyRestartAnswer(data.restartAnswer)
           .catch((err) => console.debug('ICE restart answer not applied', err?.name));
       }
@@ -547,6 +549,16 @@ async function restartIce(c) {
     c.restartN += 1;
     // While offline this write waits in the queue and is sent as soon as the network is back.
     await updateDoc(c.ref, { restartN: c.restartN, restartOffer: offer, updatedAt: serverTimestamp() });
+    // If no answer comes back, undo the pending offer so another attempt is possible
+    // (otherwise the connection stays in "have-local-offer" and every retry is skipped).
+    clearTimer(c, 'restartAnswer');
+    c.timers.restartAnswer = setTimeout(async () => {
+      c.timers.restartAnswer = null;
+      if (!isActive(c) || !c.restartPending) return;
+      c.restartPending = false;
+      await c.peer?.rollbackOffer().catch(() => {});
+      restartIce(c);
+    }, RESTART_ANSWER_TIMEOUT_MS);
   } catch (err) {
     c.restartPending = false;
     console.debug('ICE restart skipped', err?.code || err?.name);

@@ -324,7 +324,7 @@ svg { width: 20px; height: 20px; flex-shrink: 0; }
 /* ---------- Dialogs above the call screens, install button, notification codes ---------- */
 .modal.over-calls { z-index: 90; }
 .pre-line { white-space: pre-line; }
-.modal-actions.stack { flex-direction: column-reverse; align-items: stretch; }
+.modal-actions.stack { flex-direction: column; align-items: stretch; }
 .install-btn { margin-top: 14px; }
 .install-btn svg, #install-btn-settings svg, #clear-history-btn svg { width: 17px; height: 17px; }
 .code-form { display: flex; flex-direction: column; gap: 12px; padding-top: 4px; }
