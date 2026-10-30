@@ -42,7 +42,7 @@ import { notifyTyping, stopTyping, markRead, markDelivered, serverNow, stampUser
 import { playMessageSound, notifyPrivate, setUnread, closeNotification } from './notifications.js';
 
 const PAGE_SIZE = 30;
-const DELETE_BATCH = 100;
+const DELETE_BATCH = 20;            // rules allow at most 20 document lookups per batch
 export const MAX_MESSAGE_LENGTH = 4000;
 const COLLAPSE_CHARS = 1200;
 const COLLAPSE_LINES = 25;

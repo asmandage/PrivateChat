@@ -247,13 +247,13 @@ describe('messages', () => {
     await assertFails(deleteDoc(msgRef(as(B, T - 60))));   // superseded sign-in
     await assertSucceeds(deleteDoc(msgRef(as(B))));
   });
-  it('allows erasing a conversation in batches', async () => {
-    for (let i = 0; i < 30; i++) {
+  it('allows erasing a conversation in batches of 20 (the app’s batch size)', async () => {
+    for (let i = 0; i < 20; i++) {
       await seed(['conversations', 'main', 'messages', `b${i}`], { senderId: i % 2 ? A : B, text: 'x', createdAt: Timestamp.now(), deleted: false });
     }
     const db = as(A);
     const batch = writeBatch(db);
-    for (let i = 0; i < 30; i++) batch.delete(msgRef(db, `b${i}`));
+    for (let i = 0; i < 20; i++) batch.delete(msgRef(db, `b${i}`));
     await assertSucceeds(batch.commit());
   });
   it('supports the "deleted for me" query (createdAt after clearedAt)', async () => {

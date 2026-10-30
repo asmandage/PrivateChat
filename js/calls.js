@@ -60,7 +60,7 @@ const RESTART_AFTER_MS = 3_000;        // wait this long in "disconnected" befor
 const MAX_RESTARTS = 5;
 const MAX_CANDIDATES = 100;            // matches the ^[0-9]{1,2}$ id rule
 const CANDIDATE_TTL_MS = 24 * 3600_000;
-const DELETE_BATCH = 100;
+const DELETE_BATCH = 20;            // rules allow at most 20 document lookups per batch
 const HEADSET_LABEL = /head(set|phone)|earphone|earbud|airpods|buds|bluetooth|hands-?free/i;
 
 let ctx = null;                        // { myUid, peerUid, getPeerName }

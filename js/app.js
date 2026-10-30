@@ -93,20 +93,24 @@ async function startSession(user) {
   session = s;
 
   let previous;
+  let step = 'session';
   try {
     // Become the account's only active session BEFORE touching any data: the rules
     // reject every request from a sign-in that is not the recorded one.
     s.authTime = await getAuthTime(user);
     await claimSession(user.uid, s.authTime);
     if (session !== s) return;
+    step = 'profile';
     previous = await startPresence(user);
   } catch (err) {
     if (session !== s) return;
     if (err instanceof SessionSupersededError) { endSuperseded(s); return; }
     session = null;
-    const msg = err?.code === 'permission-denied'
-      ? 'Signed in, but the database denied access. Make sure both UIDs are in firestore.rules and the rules are published.'
-      : friendlyError(err, 'Could not connect to the database.');
+    const msg = err?.code !== 'permission-denied'
+      ? friendlyError(err, 'Could not connect to the database.')
+      : step === 'session'
+        ? 'Signed in, but the database refused to start a session. Publish the latest firestore.rules (they contain the new sessions/ rules) and make sure both UIDs are in them.'
+        : 'Signed in, but the database denied access. Make sure both UIDs are in firestore.rules and the rules are published.';
     await logout().catch(() => {});
     showScreen('login');
     showLoginError(msg);
